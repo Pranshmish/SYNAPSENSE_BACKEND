@@ -105,6 +105,8 @@ class MLManager:
         joblib.dump(self.rf, RF_MODEL_PATH)
         joblib.dump(self.scaler, SCALER_PATH)
 
+        # Return metrics and classes
+        metrics["classes"] = list(self.rf.classes_)
         return metrics
 
     def predict(self, features: List[float]) -> Dict[str, Any]:

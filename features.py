@@ -7,14 +7,14 @@ from datetime import datetime
 # Config from reference
 SAMPLE_RATE = 200
 BP_LOW = 8
-BP_HIGH = 80  # Reference says 90 in config line 35, but 80 in user request. User request says "8-80Hz". Reference line 34 says "MAX_DOMINANT_FREQ = 80.0". Reference line 35 says BP_HIGH=90. I will use 80 as per user request "8-80Hz Butterworth".
+BP_HIGH = 90  # Reference line 35 says BP_HIGH=90.
 FILTER_ORDER = 4
 LIF_TAU = 0.020
 LIF_THRESH = 0.025
 LIF_REFRAC = 0.010
 
 # Validation Thresholds
-MIN_ENERGY = 2000.0  # User request says 2000. Reference says 2200. I will use 2000.
+MIN_ENERGY = 2200.0  # Reference
 MIN_SIGNAL_STD = 6.0
 MIN_PEAK_DEVIATION = 35.0 # Reference
 MIN_SNR = 1.5
@@ -147,7 +147,7 @@ class FootstepFeatureExtractor:
             
             # Low freq ratio (5-30Hz)
             lo_idx = (freqs >= 5) & (freqs <= 30)
-            lo_rat = float(np.sum(fft_m[lo_idx])) / tot if tot > 0 else 0.0
+            lo_rat = float(np.sum(fft_m[lo_idx]*2)/tot) if tot > 0 else 0.0
             
             # LIF features
             spk, mem = self.lif.encode(sig)

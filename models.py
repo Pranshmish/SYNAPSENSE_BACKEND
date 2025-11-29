@@ -11,6 +11,7 @@ class TrainResponse(BaseModel):
     samples_per_person: Dict[str, int]
     features_extracted: Optional[List[List[float]]] = None
     metrics: Optional[Dict[str, float]] = None
+    model_classes: List[str] = ["Pranshul", "Aditi", "Apurv", "Samir", "Intruder"]
 
 class PredictRequest(BaseModel):
     data: List[float]  # Single 200-sample chunk
@@ -18,8 +19,12 @@ class PredictRequest(BaseModel):
 class PredictResponse(BaseModel):
     prediction: str
     confidence: float
+    is_intruder: bool
+    alert: str
     probabilities: Dict[str, float]
 
 class StatusResponse(BaseModel):
     samples_per_person: Dict[str, int]
     model_status: str
+    classes: List[str]
+    intruder_threshold: float
