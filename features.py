@@ -1,11 +1,19 @@
 """
-Enhanced Feature Extraction for Binary HOME vs INTRUDER Classification
-Uses LIF spike features + FFT spectral features + statistical features (~50 total)
+Enhanced Feature Extraction for HOME Footstep Anomaly Detection
+Uses LIF spike features + FFT spectral features + MFCC + statistical features (~85 total)
+
+Improvements:
+- Wider bandpass filter (8-200Hz) to capture full footstep spectrum
+- MFCC features for temporal envelope analysis
+- Signal entropy for complexity measure
+- Smoothed RMS for amplitude envelope
+- Adaptive gain normalization
 """
 
 import numpy as np
-from scipy.signal import butter, filtfilt, find_peaks
-from scipy.fft import fft, fftfreq
+from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
+from scipy.fft import fft, fftfreq, dct
+from scipy.ndimage import gaussian_filter1d
 from typing import List, Tuple, Optional, Dict
 import warnings
 warnings.filterwarnings('ignore')
@@ -138,7 +146,13 @@ class LIF:
 class FootstepFeatureExtractor:
     """
     Complete feature extraction pipeline for footstep vibration signals.
-    Extracts ~50 features combining LIF, FFT, and statistical approaches.
+    Extracts ~85 features combining LIF, FFT, MFCC, and statistical approaches.
+    
+    Improvements:
+    - Wider bandpass (8-200Hz) for full footstep spectrum
+    - MFCC for temporal envelope
+    - Signal entropy for complexity
+    - Adaptive gain normalization
     """
     
     def __init__(self, sample_rate: float = 200.0):
@@ -158,11 +172,19 @@ class FootstepFeatureExtractor:
             'bass': (10, 25),          # Main footstep frequency
             'low_mid': (25, 50),       # Secondary harmonics
             'high_mid': (50, 80),      # High frequency content
+            'high': (80, 150),         # Extended high frequency
         }
         
+        # MFCC configuration
+        self.n_mfcc = 13  # Number of MFCC coefficients
+        self.n_mels = 26  # Number of mel filter banks
+        
     def butterworth_filter(self, data: np.ndarray, lowcut: float = 8.0, 
-                          highcut: float = 90.0, order: int = 4) -> np.ndarray:
-        """Apply Butterworth bandpass filter to isolate footstep frequencies."""
+                          highcut: float = 95.0, order: int = 4) -> np.ndarray:
+        """
+        Apply Butterworth bandpass filter to isolate footstep frequencies.
+        Widened range (8-95Hz) to capture full footstep spectrum.
+        """
         low = lowcut / self.nyquist
         high = min(highcut / self.nyquist, 0.99)
         
@@ -182,6 +204,44 @@ class FootstepFeatureExtractor:
         if max_val > 0:
             return data / max_val
         return data
+    
+    def adaptive_gain_normalize(self, data: np.ndarray) -> np.ndarray:
+        """
+        Apply adaptive gain normalization to handle variable signal amplitudes.
+        Helps with low/medium vibration signals in synthetic tests.
+        """
+        data = np.array(data, dtype=np.float64)
+        
+        # Calculate windowed RMS for adaptive gain
+        window_size = max(20, len(data) // 10)
+        
+        # Pad data for windowed processing
+        padded = np.pad(data, (window_size // 2, window_size // 2), mode='reflect')
+        
+        # Calculate local RMS envelope
+        local_rms = np.zeros(len(data))
+        for i in range(len(data)):
+            window = padded[i:i + window_size]
+            local_rms[i] = np.sqrt(np.mean(window ** 2)) + 1e-8
+        
+        # Smooth the envelope
+        local_rms = gaussian_filter1d(local_rms, sigma=window_size // 4)
+        
+        # Target RMS (median of the local RMS values)
+        target_rms = np.median(local_rms)
+        if target_rms < 1e-6:
+            target_rms = np.std(data)
+        
+        # Apply adaptive gain
+        gain = np.clip(target_rms / local_rms, 0.1, 10)  # Limit gain range
+        normalized = data * gain
+        
+        # Final normalization to [-1, 1]
+        max_val = np.max(np.abs(normalized))
+        if max_val > 0:
+            normalized = normalized / max_val
+            
+        return normalized
         
     def validate_chunk(self, data: np.ndarray, min_std: float = 0.0001) -> bool:
         """
@@ -232,7 +292,46 @@ class FootstepFeatureExtractor:
         features['stat_energy'] = np.sum(data ** 2)
         features['stat_power'] = features['stat_energy'] / len(data)
         
+        # Smoothed RMS envelope features
+        smoothed_rms = self._smoothed_rms_envelope(data)
+        features['stat_smoothed_rms_mean'] = np.mean(smoothed_rms)
+        features['stat_smoothed_rms_std'] = np.std(smoothed_rms)
+        features['stat_smoothed_rms_max'] = np.max(smoothed_rms)
+        
+        # Signal entropy (complexity measure)
+        features['stat_signal_entropy'] = self._signal_entropy(data)
+        
         return features
+    
+    def _smoothed_rms_envelope(self, data: np.ndarray, window_size: int = 20) -> np.ndarray:
+        """Calculate smoothed RMS envelope of the signal."""
+        # Calculate squared values
+        squared = data ** 2
+        
+        # Apply convolution for windowed mean
+        window = np.ones(window_size) / window_size
+        if len(data) >= window_size:
+            smoothed = np.convolve(squared, window, mode='same')
+            return np.sqrt(smoothed)
+        else:
+            return np.sqrt(np.mean(squared)) * np.ones(len(data))
+    
+    def _signal_entropy(self, data: np.ndarray, n_bins: int = 32) -> float:
+        """
+        Calculate Shannon entropy of the signal's amplitude distribution.
+        Higher entropy = more random/noisy, Lower entropy = more structured.
+        """
+        # Create histogram of signal values
+        hist, _ = np.histogram(data, bins=n_bins, density=True)
+        
+        # Add small epsilon to avoid log(0)
+        hist = hist + 1e-10
+        hist = hist / np.sum(hist)  # Normalize
+        
+        # Calculate entropy
+        entropy = -np.sum(hist * np.log2(hist))
+        
+        return entropy
         
     def extract_fft_features(self, data: np.ndarray) -> Dict[str, float]:
         """
@@ -285,6 +384,86 @@ class FootstepFeatureExtractor:
         features['fft_flatness'] = geometric_mean / (arithmetic_mean + 1e-10)
         
         return features
+    
+    def extract_mfcc_features(self, data: np.ndarray) -> Dict[str, float]:
+        """
+        Extract MFCC (Mel-Frequency Cepstral Coefficients) features.
+        Excellent for capturing temporal envelope characteristics.
+        """
+        features = {}
+        
+        # Compute FFT
+        n = len(data)
+        fft_vals = fft(data)
+        power_spectrum = np.abs(fft_vals[:n // 2]) ** 2
+        freqs = fftfreq(n, 1 / self.sample_rate)[:n // 2]
+        
+        # Create mel filter banks
+        mel_filters = self._create_mel_filterbank(n // 2, self.n_mels)
+        
+        # Apply mel filters to power spectrum
+        mel_energies = np.dot(mel_filters, power_spectrum)
+        mel_energies = np.maximum(mel_energies, 1e-10)  # Avoid log(0)
+        
+        # Apply log compression
+        log_mel_energies = np.log(mel_energies)
+        
+        # Apply DCT to get MFCCs
+        mfccs = dct(log_mel_energies, type=2, norm='ortho')[:self.n_mfcc]
+        
+        # Store MFCC coefficients as features
+        for i, mfcc_val in enumerate(mfccs):
+            features[f'mfcc_{i}'] = float(mfcc_val)
+        
+        # MFCC statistics
+        features['mfcc_mean'] = float(np.mean(mfccs))
+        features['mfcc_std'] = float(np.std(mfccs))
+        features['mfcc_max'] = float(np.max(mfccs))
+        features['mfcc_min'] = float(np.min(mfccs))
+        
+        return features
+    
+    def _create_mel_filterbank(self, n_fft_bins: int, n_mels: int) -> np.ndarray:
+        """Create mel-scale triangular filter bank."""
+        # Mel scale conversion functions
+        def hz_to_mel(hz):
+            return 2595 * np.log10(1 + hz / 700)
+        
+        def mel_to_hz(mel):
+            return 700 * (10 ** (mel / 2595) - 1)
+        
+        # Frequency range
+        low_freq = 1
+        high_freq = self.sample_rate / 2
+        
+        # Mel points
+        low_mel = hz_to_mel(low_freq)
+        high_mel = hz_to_mel(high_freq)
+        mel_points = np.linspace(low_mel, high_mel, n_mels + 2)
+        hz_points = mel_to_hz(mel_points)
+        
+        # Convert to FFT bin indices
+        bin_points = np.floor((n_fft_bins * 2) * hz_points / self.sample_rate).astype(int)
+        bin_points = np.clip(bin_points, 0, n_fft_bins - 1)
+        
+        # Create filterbank
+        filterbank = np.zeros((n_mels, n_fft_bins))
+        for i in range(n_mels):
+            left = bin_points[i]
+            center = bin_points[i + 1]
+            right = bin_points[i + 2]
+            
+            # Rising edge
+            for j in range(left, center):
+                if center != left:
+                    filterbank[i, j] = (j - left) / (center - left)
+            
+            # Falling edge
+            for j in range(center, right):
+                if right != center:
+                    filterbank[i, j] = (right - j) / (right - center)
+        
+        return filterbank
         
     def extract_lif_features(self, data: np.ndarray) -> Dict[str, float]:
         """
@@ -340,6 +519,12 @@ class FootstepFeatureExtractor:
         """
         Process a chunk of raw ADC samples and extract all features.
         Returns None if chunk is invalid.
+        
+        Pipeline:
+        1. Validate chunk
+        2. Apply bandpass filter (8-95Hz)
+        3. Apply adaptive gain normalization
+        4. Extract statistical, FFT, MFCC, and LIF features
         """
         # Convert to numpy array
         data = np.array(raw_data, dtype=np.float64)
@@ -351,17 +536,18 @@ class FootstepFeatureExtractor:
         
         print(f"[FEATURES] Validation OK: len={len(data)}, std={np.std(data):.2f}, mean={np.mean(data):.2f}")
             
-        # Apply bandpass filter
-        filtered = self.butterworth_filter(data)
+        # Apply bandpass filter (widened to 8-95Hz)
+        filtered = self.butterworth_filter(data, lowcut=8.0, highcut=95.0)
         
-        # Normalize
-        normalized = self.normalize_signal(filtered)
+        # Apply adaptive gain normalization (helps with low/medium vibration)
+        normalized = self.adaptive_gain_normalize(filtered)
         
         # Extract all feature sets
         try:
             features = {}
             features.update(self.extract_statistical_features(normalized))
             features.update(self.extract_fft_features(normalized))
+            features.update(self.extract_mfcc_features(normalized))  # NEW: MFCC features
             features.update(self.extract_lif_features(normalized))
             
             # Convert all numpy types to Python native types for JSON serialization
@@ -387,33 +573,41 @@ class FootstepFeatureExtractor:
 
 # Feature names for ML model (must match extraction order)
 FEATURE_NAMES = [
-    # Statistical features (16)
+    # Statistical features (19) - includes new smoothed RMS and entropy
     'stat_mean', 'stat_std', 'stat_var', 'stat_max', 'stat_min', 'stat_range',
     'stat_rms', 'stat_skewness', 'stat_kurtosis', 'stat_zero_crossings', 'stat_zcr',
     'stat_peak_count', 'stat_peak_mean', 'stat_energy', 'stat_power',
+    'stat_smoothed_rms_mean', 'stat_smoothed_rms_std', 'stat_smoothed_rms_max',
+    'stat_signal_entropy',
     
-    # FFT features (17)
+    # FFT features (19) - includes new high band
     'fft_total_energy', 
     'fft_sub_bass_energy', 'fft_sub_bass_ratio',
     'fft_bass_energy', 'fft_bass_ratio',
     'fft_low_mid_energy', 'fft_low_mid_ratio',
     'fft_high_mid_energy', 'fft_high_mid_ratio',
+    'fft_high_energy', 'fft_high_ratio',
     'fft_centroid', 'fft_spread', 'fft_rolloff',
     'fft_dominant_freq', 'fft_dominant_magnitude', 'fft_flatness',
     
-    # LIF features - low threshold neuron (14)
+    # MFCC features (17) - NEW
+    'mfcc_0', 'mfcc_1', 'mfcc_2', 'mfcc_3', 'mfcc_4', 'mfcc_5', 'mfcc_6',
+    'mfcc_7', 'mfcc_8', 'mfcc_9', 'mfcc_10', 'mfcc_11', 'mfcc_12',
+    'mfcc_mean', 'mfcc_std', 'mfcc_max', 'mfcc_min',
+    
+    # LIF features - low threshold neuron (15)
     'lif_low_spike_count', 'lif_low_spike_rate', 'lif_low_isi_mean', 'lif_low_isi_std',
     'lif_low_isi_cv', 'lif_low_isi_min', 'lif_low_isi_max', 'lif_low_burst_count',
     'lif_low_burst_ratio', 'lif_low_first_spike_time', 'lif_low_last_spike_time',
     'lif_low_spike_duration', 'lif_low_potential_mean', 'lif_low_potential_max', 'lif_low_potential_std',
     
-    # LIF features - mid threshold neuron (14)
+    # LIF features - mid threshold neuron (15)
     'lif_mid_spike_count', 'lif_mid_spike_rate', 'lif_mid_isi_mean', 'lif_mid_isi_std',
     'lif_mid_isi_cv', 'lif_mid_isi_min', 'lif_mid_isi_max', 'lif_mid_burst_count',
     'lif_mid_burst_ratio', 'lif_mid_first_spike_time', 'lif_mid_last_spike_time',
     'lif_mid_spike_duration', 'lif_mid_potential_mean', 'lif_mid_potential_max', 'lif_mid_potential_std',
     
-    # LIF features - high threshold neuron (14)
+    # LIF features - high threshold neuron (15)
     'lif_high_spike_count', 'lif_high_spike_rate', 'lif_high_isi_mean', 'lif_high_isi_std',
     'lif_high_isi_cv', 'lif_high_isi_min', 'lif_high_isi_max', 'lif_high_burst_count',
     'lif_high_burst_ratio', 'lif_high_first_spike_time', 'lif_high_last_spike_time',

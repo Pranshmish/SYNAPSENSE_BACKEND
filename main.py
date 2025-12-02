@@ -83,16 +83,21 @@ async def train_data(request: TrainDataRequest):
     Process training data and optionally train the model.
     
     Labels should be:
-    - "HOME" or "HOME_SAMPLE" for home user footsteps
-    - "INTRUDER" or "INTRUDER_SAMPLE" for intruder footsteps
+    - "HOME" or "HOME_*" for home user footsteps
+    - "INTRUDER" or "INTRUDER_*" for intruder footsteps
     """
     try:
-        # Normalize label to binary
+        # Normalize label to binary based on prefix
         label = request.label.upper()
-        if label in ["HOME", "HOME_SAMPLE"]:
+        if label.startswith("HOME"):
             binary_label = LABEL_HOME
-        else:
+        elif label.startswith("INTRUDER"):
             binary_label = LABEL_INTRUDER
+        else:
+            # Default to HOME for unknown labels (safer assumption)
+            binary_label = LABEL_HOME
+        
+        print(f"[TRAIN] Received label='{request.label}' → normalized to '{binary_label}'")
             
         extracted_features_list = []
         valid_samples = 0
@@ -165,7 +170,7 @@ async def train_data(request: TrainDataRequest):
 async def predict_footsteps(request: PredictRequest):
     """
     Predict whether footstep is HOME or INTRUDER.
-    Returns prediction with confidence and probability distribution.
+    Returns enhanced prediction with anomaly score, confidence band, and color coding.
     """
     # Extract features from chunk
     features_dict = extractor.process_chunk(request.data)
@@ -194,24 +199,55 @@ async def predict_footsteps(request: PredictRequest):
     is_intruder = result["is_intruder"]
     probabilities = result["probabilities"]
     
-    # Generate alert message
+    # Get enhanced scoring details
+    anomaly_score = result.get("anomaly_score", 0.0)
+    threshold = result.get("threshold", 0.0)
+    confidence_band = result.get("confidence_band", "medium")
+    z_score = result.get("z_score", 0.0)
+    svm_agrees = result.get("svm_agrees", None)
+    binary_prediction = result.get("binary_prediction", None)
+    
+    # Determine color code for UI
     if is_intruder:
-        if confidence > 0.8:
-            alert = f"🚨 INTRUDER DETECTED (High Confidence: {confidence:.1%})"
+        if confidence_band == "high":
+            color_code = "red"
         else:
-            alert = f"⚠️ Possible Intruder ({confidence:.1%} confidence)"
+            color_code = "yellow"  # Uncertain intruder
     else:
-        if confidence > 0.8:
-            alert = f"✅ HOME User Verified ({confidence:.1%})"
+        if confidence_band == "high":
+            color_code = "green"
         else:
-            alert = f"🏠 Likely Home User ({confidence:.1%} confidence)"
+            color_code = "yellow"  # Uncertain home
+    
+    # Generate enhanced alert message
+    if is_intruder:
+        if confidence_band == "high":
+            alert = f"🚨 INTRUDER DETECTED ({confidence:.1%} confidence, score={anomaly_score:.3f})"
+        elif confidence_band == "medium":
+            alert = f"⚠️ Possible Intruder ({confidence:.1%}, score={anomaly_score:.3f})"
+        else:
+            alert = f"❓ Uncertain - possible intruder ({confidence:.1%})"
+    else:
+        if confidence_band == "high":
+            alert = f"✅ HOME User Verified ({confidence:.1%})"
+        elif confidence_band == "medium":
+            alert = f"🏠 Likely Home User ({confidence:.1%})"
+        else:
+            alert = f"❓ Uncertain - possibly home ({confidence:.1%})"
     
     return PredictResponse(
         prediction=prediction,
         confidence=confidence,
         is_intruder=is_intruder,
         alert=alert,
-        probabilities=probabilities
+        probabilities=probabilities,
+        anomaly_score=anomaly_score,
+        threshold=threshold,
+        confidence_band=confidence_band,
+        color_code=color_code,
+        svm_agrees=svm_agrees,
+        binary_prediction=binary_prediction,
+        z_score=z_score
     )
 
 
@@ -282,10 +318,22 @@ async def get_dataset_status():
                         sample_count += len(df)
                     except:
                         pass
+                # Determine type based on label prefix
+                # HOME, HOME_name → HOME type
+                # INTRUDER, INTRUDER_name → INTRUDER type
+                label_upper = person_dir.upper()
+                if label_upper.startswith('HOME'):
+                    label_type = 'HOME'
+                elif label_upper.startswith('INTRUDER'):
+                    label_type = 'INTRUDER'
+                else:
+                    # Default to the label name itself
+                    label_type = person_dir
+                    
                 persons.append({
                     'name': person_dir,
                     'samples': sample_count,
-                    'type': 'HOME' if person_dir == 'HOME' else 'INTRUDER'
+                    'type': label_type
                 })
                 total_samples += sample_count
     
@@ -296,7 +344,7 @@ async def get_dataset_status():
         'persons': persons,
         'total_samples': total_samples,
         'model_status': 'trained' if model_trained else 'needs_training',
-        'model_accuracy': model_status.get('accuracy') if model_trained else None,
+        'model_accuracy': model_status.get('training_accuracy') if model_trained else None,
         'classes': [LABEL_HOME, LABEL_INTRUDER]
     }
 
