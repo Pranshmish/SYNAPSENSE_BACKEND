@@ -1,15 +1,16 @@
 """
-Binary Classification ML Module for HOME vs INTRUDER Detection
-Uses RandomForest as primary classifier with comprehensive feature set.
+One-Class Anomaly Detection ML Module for HOME Footstep Recognition
+Uses Isolation Forest for anomaly detection - trains ONLY on HOME samples.
+Intruders/unknowns are detected as anomalies (outliers).
 """
 
 import os
 import joblib
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.ensemble import IsolationForest
+from sklearn.svm import OneClassSVM
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
 from typing import List, Dict, Any, Optional
 import warnings
 warnings.filterwarnings('ignore')
@@ -17,27 +18,33 @@ warnings.filterwarnings('ignore')
 from features import FEATURE_NAMES, get_feature_vector
 
 MODELS_DIR = "models"
-RF_MODEL_PATH = os.path.join(MODELS_DIR, "rf_model.pkl")
-SCALER_PATH = os.path.join(MODELS_DIR, "scaler.pkl")
+IF_MODEL_PATH = os.path.join(MODELS_DIR, "home_detector_if.pkl")
+SCALER_PATH = os.path.join(MODELS_DIR, "feature_scaler.pkl")
 METADATA_PATH = os.path.join(MODELS_DIR, "model_metadata.pkl")
+SVM_MODEL_PATH = os.path.join(MODELS_DIR, "home_detector_svm.pkl")
 
-# Binary classification labels
+# Labels
 LABEL_HOME = "HOME"
-LABEL_INTRUDER = "INTRUDER"
+LABEL_INTRUDER = "INTRUDER"  # Detected as anomaly, not trained
 
 
-class BinaryClassifier:
+class AnomalyDetector:
     """
-    Binary classifier for HOME vs INTRUDER footstep detection.
-    Uses RandomForest with StandardScaler preprocessing.
+    One-Class Anomaly Detection for HOME footstep recognition.
+    Trains ONLY on HOME footsteps - intruders are detected as anomalies.
+    
+    Primary: IsolationForest (fast, robust)
+    Secondary: OneClassSVM (stricter, optional)
     """
     
     def __init__(self):
         self._init_dirs()
-        self.model: Optional[RandomForestClassifier] = None
+        self.isolation_forest: Optional[IsolationForest] = None
+        self.one_class_svm: Optional[OneClassSVM] = None
         self.scaler: Optional[StandardScaler] = None
         self.metadata: Dict[str, Any] = {}
         self.is_trained = False
+        self.anomaly_threshold = -0.1  # Default threshold for decision function
         self.load_models()
         
     def _init_dirs(self):
@@ -46,15 +53,21 @@ class BinaryClassifier:
         
     def load_models(self) -> bool:
         """Load trained models from disk if available."""
-        if (os.path.exists(RF_MODEL_PATH) and 
+        if (os.path.exists(IF_MODEL_PATH) and 
             os.path.exists(SCALER_PATH) and 
             os.path.exists(METADATA_PATH)):
             try:
-                self.model = joblib.load(RF_MODEL_PATH)
+                self.isolation_forest = joblib.load(IF_MODEL_PATH)
                 self.scaler = joblib.load(SCALER_PATH)
                 self.metadata = joblib.load(METADATA_PATH)
+                self.anomaly_threshold = self.metadata.get('anomaly_threshold', -0.1)
+                
+                # Load optional SVM if exists
+                if os.path.exists(SVM_MODEL_PATH):
+                    self.one_class_svm = joblib.load(SVM_MODEL_PATH)
+                    
                 self.is_trained = True
-                print(f"[ML] Models loaded. Accuracy: {self.metadata.get('accuracy', 'N/A')}")
+                print(f"[ML] Anomaly detector loaded. HOME samples: {self.metadata.get('home_samples', 'N/A')}")
                 return True
             except Exception as e:
                 print(f"[ML] Error loading models: {e}")
@@ -67,21 +80,27 @@ class BinaryClassifier:
     def save_models(self):
         """Save trained models to disk."""
         try:
-            joblib.dump(self.model, RF_MODEL_PATH)
+            joblib.dump(self.isolation_forest, IF_MODEL_PATH)
             joblib.dump(self.scaler, SCALER_PATH)
             joblib.dump(self.metadata, METADATA_PATH)
+            
+            if self.one_class_svm is not None:
+                joblib.dump(self.one_class_svm, SVM_MODEL_PATH)
+                
             print("[ML] Models saved successfully.")
         except Exception as e:
             print(f"[ML] Error saving models: {e}")
             
     def reset(self):
         """Reset/delete all trained models."""
-        self.model = None
+        self.isolation_forest = None
+        self.one_class_svm = None
         self.scaler = None
         self.metadata = {}
         self.is_trained = False
+        self.anomaly_threshold = -0.1
         
-        for path in [RF_MODEL_PATH, SCALER_PATH, METADATA_PATH]:
+        for path in [IF_MODEL_PATH, SCALER_PATH, METADATA_PATH, SVM_MODEL_PATH]:
             if os.path.exists(path):
                 try:
                     os.remove(path)
@@ -97,57 +116,50 @@ class BinaryClassifier:
         """
         X = []
         for item in data:
-            # Handle both dict and list inputs
             if isinstance(item, dict):
-                row = [item.get(name, 0.0) for name in FEATURE_NAMES]
+                row = [float(item.get(name, 0.0)) for name in FEATURE_NAMES]
             else:
-                row = list(item)  # Assume it's already a list
+                row = [float(v) for v in item]
             X.append(row)
         return np.array(X, dtype=np.float64)
         
     def train(self, data: List[Dict[str, float]], labels: List[str]) -> Dict[str, Any]:
         """
-        Train the binary classifier on provided data.
+        Train the anomaly detector on HOME samples ONLY.
         
         Args:
             data: List of feature dictionaries
-            labels: List of labels (HOME or INTRUDER)
+            labels: List of labels (only HOME samples are used)
             
         Returns:
             Dictionary with training metrics and status
         """
-        # Validate inputs
-        if len(data) < 10:
-            return {
-                "success": False,
-                "error": "Not enough data. Need at least 10 samples.",
-                "samples_provided": len(data)
-            }
-            
-        # Convert labels to binary
-        binary_labels = []
+        # Filter to HOME samples only
+        home_data = []
         home_count = 0
-        intruder_count = 0
+        other_count = 0
         
-        for label in labels:
+        for item, label in zip(data, labels):
             label_upper = label.upper()
             if label_upper == LABEL_HOME or label_upper == "HOME_SAMPLE":
-                binary_labels.append(LABEL_HOME)
+                home_data.append(item)
                 home_count += 1
             else:
-                binary_labels.append(LABEL_INTRUDER)
-                intruder_count += 1
+                other_count += 1
                 
-        # Check class balance
-        if home_count < 3 or intruder_count < 3:
+        # Validate - need enough HOME samples
+        if home_count < 5:
             return {
                 "success": False,
-                "error": f"Need at least 3 samples per class. HOME: {home_count}, INTRUDER: {intruder_count}"
+                "error": f"Not enough HOME samples. Need at least 5, got {home_count}.",
+                "samples_provided": len(data),
+                "home_samples": home_count
             }
             
-        # Prepare feature matrix
-        X = self.prepare_features(data)
-        y = np.array(binary_labels)
+        print(f"[ML] Training on {home_count} HOME samples (ignoring {other_count} other samples)")
+            
+        # Prepare feature matrix (HOME only)
+        X = self.prepare_features(home_data)
         
         # Handle NaN/Inf values
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
@@ -156,63 +168,94 @@ class BinaryClassifier:
         self.scaler = StandardScaler()
         X_scaled = self.scaler.fit_transform(X)
         
-        # Split data (stratified to maintain class balance)
-        try:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_scaled, y, test_size=0.2, stratify=y, random_state=42
-            )
-        except ValueError:
-            # Fallback if stratification fails
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_scaled, y, test_size=0.2, random_state=42
-            )
-            
-        # Train RandomForest
-        self.model = RandomForestClassifier(
-            n_estimators=150,
-            max_depth=12,
-            min_samples_split=5,
-            min_samples_leaf=2,
-            class_weight='balanced',
+        # Train Isolation Forest (primary model)
+        # contamination=0.02 assumes ~2% of HOME samples might be outliers
+        self.isolation_forest = IsolationForest(
+            n_estimators=200,
+            max_samples='auto',
+            contamination=0.02,
+            bootstrap=True,
             random_state=42,
             n_jobs=-1
         )
-        self.model.fit(X_train, y_train)
+        self.isolation_forest.fit(X_scaled)
         
-        # Evaluate on test set
-        y_pred = self.model.predict(X_test)
+        # Calculate anomaly scores for threshold calibration
+        anomaly_scores = -self.isolation_forest.decision_function(X_scaled)
         
-        accuracy = float(accuracy_score(y_test, y_pred))
-        precision = float(precision_score(y_test, y_pred, pos_label=LABEL_HOME, zero_division=0))
-        recall = float(recall_score(y_test, y_pred, pos_label=LABEL_HOME, zero_division=0))
-        f1 = float(f1_score(y_test, y_pred, pos_label=LABEL_HOME, zero_division=0))
+        # Auto-calibrate threshold: mean + 2*std of HOME scores
+        # This ensures most HOME samples are classified correctly
+        score_mean = float(np.mean(anomaly_scores))
+        score_std = float(np.std(anomaly_scores))
+        self.anomaly_threshold = score_mean + 2 * score_std  # Higher score = more anomalous
         
-        # Confusion matrix
-        cm = confusion_matrix(y_test, y_pred, labels=[LABEL_HOME, LABEL_INTRUDER])
+        # Predictions on training data (for validation)
+        train_predictions = self.isolation_forest.predict(X_scaled)
+        home_correctly_identified = int(np.sum(train_predictions == 1))  # 1 = inlier (HOME)
+        home_misclassified = int(np.sum(train_predictions == -1))  # -1 = outlier
         
-        # Cross-validation for more robust estimate
-        cv_scores = cross_val_score(self.model, X_scaled, y, cv=min(5, len(y) // 2), scoring='accuracy')
+        training_accuracy = home_correctly_identified / len(train_predictions) * 100
+        
+        # K-Fold cross-validation for robustness estimate
+        kf = KFold(n_splits=min(5, home_count), shuffle=True, random_state=42)
+        cv_scores = []
+        
+        for train_idx, val_idx in kf.split(X_scaled):
+            X_train_cv = X_scaled[train_idx]
+            X_val_cv = X_scaled[val_idx]
+            
+            if_cv = IsolationForest(
+                n_estimators=100,
+                contamination=0.02,
+                random_state=42,
+                n_jobs=-1
+            )
+            if_cv.fit(X_train_cv)
+            
+            val_pred = if_cv.predict(X_val_cv)
+            cv_accuracy = np.mean(val_pred == 1) * 100
+            cv_scores.append(cv_accuracy)
+            
         cv_mean = float(np.mean(cv_scores))
         cv_std = float(np.std(cv_scores))
         
-        # Feature importance
-        feature_importance = dict(zip(FEATURE_NAMES, self.model.feature_importances_))
-        top_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:10]
+        # Optional: Train OneClassSVM as secondary model
+        if home_count >= 10:
+            try:
+                self.one_class_svm = OneClassSVM(
+                    kernel='rbf',
+                    gamma='scale',
+                    nu=0.05
+                )
+                self.one_class_svm.fit(X_scaled)
+                print("[ML] OneClassSVM trained as secondary detector.")
+            except Exception as e:
+                print(f"[ML] OneClassSVM training skipped: {e}")
+                self.one_class_svm = None
+        
+        # Feature importance (based on variance contribution)
+        feature_variance = np.var(X_scaled, axis=0)
+        feature_importance = feature_variance / (np.sum(feature_variance) + 1e-10)
+        top_features = sorted(
+            zip(FEATURE_NAMES, feature_importance), 
+            key=lambda x: x[1], 
+            reverse=True
+        )[:10]
         
         # Store metadata
         self.metadata = {
-            "accuracy": accuracy,
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
+            "home_samples": home_count,
+            "training_accuracy": training_accuracy,
             "cv_accuracy_mean": cv_mean,
             "cv_accuracy_std": cv_std,
-            "confusion_matrix": cm.tolist(),
-            "home_samples": home_count,
-            "intruder_samples": intruder_count,
-            "total_samples": len(data),
+            "anomaly_threshold": self.anomaly_threshold,
+            "score_mean": score_mean,
+            "score_std": score_std,
+            "home_correctly_identified": home_correctly_identified,
+            "home_misclassified": home_misclassified,
             "top_features": top_features,
-            "classes": [LABEL_HOME, LABEL_INTRUDER]
+            "model_type": "IsolationForest",
+            "has_svm_backup": self.one_class_svm is not None
         }
         
         # Save models
@@ -221,42 +264,41 @@ class BinaryClassifier:
         
         return {
             "success": True,
+            "model_type": "One-Class Anomaly Detection (Isolation Forest)",
             "metrics": {
-                "accuracy": accuracy,
-                "precision": precision,
-                "recall": recall,
-                "f1": f1,
-                "cv_accuracy": f"{cv_mean:.3f} ± {cv_std:.3f}"
+                "training_accuracy": round(training_accuracy, 2),
+                "cv_accuracy": f"{cv_mean:.1f}% ± {cv_std:.1f}%",
+                "home_recognition_rate": f"{home_correctly_identified}/{home_count}",
+                "anomaly_threshold": round(self.anomaly_threshold, 4)
             },
             "dataset": {
-                "total": len(data),
-                "home": home_count,
-                "intruder": intruder_count
+                "home_samples_used": home_count,
+                "other_samples_ignored": other_count,
+                "total_provided": len(data)
             },
-            "confusion_matrix": {
-                "true_home_pred_home": int(cm[0, 0]),
-                "true_home_pred_intruder": int(cm[0, 1]),
-                "true_intruder_pred_home": int(cm[1, 0]),
-                "true_intruder_pred_intruder": int(cm[1, 1])
+            "calibration": {
+                "score_mean": round(score_mean, 4),
+                "score_std": round(score_std, 4),
+                "threshold": round(self.anomaly_threshold, 4)
             },
             "top_features": [{"name": name, "importance": float(imp)} for name, imp in top_features[:5]],
-            "classes": [LABEL_HOME, LABEL_INTRUDER]
+            "note": "Model trained on HOME samples only. Unknown patterns will be flagged as INTRUDER."
         }
         
     def predict(self, features: List[float]) -> Dict[str, Any]:
         """
-        Predict HOME or INTRUDER from feature vector.
+        Predict if footstep is HOME (normal) or INTRUDER (anomaly).
         
         Args:
             features: List of features matching FEATURE_NAMES order
             
         Returns:
-            Dictionary with prediction, confidence, and probabilities
+            Dictionary with prediction, confidence, and anomaly scores
         """
-        if not self.is_trained or self.model is None or self.scaler is None:
+        if not self.is_trained or self.isolation_forest is None or self.scaler is None:
             return {
                 "success": False,
-                "error": "Model not trained. Please train first.",
+                "error": "Model not trained. Please collect HOME samples and train.",
                 "prediction": None
             }
             
@@ -270,25 +312,55 @@ class BinaryClassifier:
             # Scale features
             X_scaled = self.scaler.transform(X)
             
-            # Get prediction and probabilities
-            prediction = self.model.predict(X_scaled)[0]
-            probabilities = self.model.predict_proba(X_scaled)[0]
+            # Get Isolation Forest prediction
+            # predict returns: 1 = inlier (HOME), -1 = outlier (INTRUDER)
+            if_prediction = self.isolation_forest.predict(X_scaled)[0]
             
-            # Map probabilities to labels
-            prob_dict = {
-                str(cls): float(prob) 
-                for cls, prob in zip(self.model.classes_, probabilities)
-            }
+            # Get anomaly score (higher = more anomalous)
+            # decision_function returns negative for outliers, positive for inliers
+            raw_score = self.isolation_forest.decision_function(X_scaled)[0]
+            anomaly_score = -raw_score  # Flip so higher = more anomalous
             
-            confidence = float(prob_dict[prediction])
+            # Calculate confidence based on distance from threshold
+            score_mean = self.metadata.get('score_mean', 0)
+            score_std = self.metadata.get('score_std', 1)
+            
+            # Normalize anomaly score to 0-1 range for confidence
+            if if_prediction == 1:  # HOME
+                # How confident we are this is HOME (lower anomaly score = higher confidence)
+                z_score = (anomaly_score - score_mean) / (score_std + 1e-6)
+                confidence = float(1 / (1 + np.exp(z_score)))  # Sigmoid
+                confidence = max(0.5, min(0.99, confidence))  # Clamp
+            else:  # INTRUDER (anomaly)
+                # Higher anomaly score = higher confidence it's an intruder
+                z_score = (anomaly_score - self.anomaly_threshold) / (score_std + 1e-6)
+                confidence = float(1 / (1 + np.exp(-z_score)))  # Sigmoid
+                confidence = max(0.5, min(0.99, confidence))
+            
+            # Map prediction to label
+            prediction = LABEL_HOME if if_prediction == 1 else LABEL_INTRUDER
             is_intruder = prediction == LABEL_INTRUDER
+            
+            # Secondary SVM check (if available)
+            svm_agrees = None
+            if self.one_class_svm is not None:
+                svm_prediction = self.one_class_svm.predict(X_scaled)[0]
+                svm_agrees = (svm_prediction == 1 and prediction == LABEL_HOME) or \
+                            (svm_prediction == -1 and prediction == LABEL_INTRUDER)
             
             return {
                 "success": True,
                 "prediction": prediction,
                 "is_intruder": is_intruder,
-                "confidence": confidence,
-                "probabilities": prob_dict
+                "confidence": round(confidence, 3),
+                "anomaly_score": round(float(anomaly_score), 4),
+                "threshold": round(float(self.anomaly_threshold), 4),
+                "raw_score": round(float(raw_score), 4),
+                "svm_agrees": svm_agrees,
+                "probabilities": {
+                    LABEL_HOME: round(1 - confidence if is_intruder else confidence, 3),
+                    LABEL_INTRUDER: round(confidence if is_intruder else 1 - confidence, 3)
+                }
             }
             
         except Exception as e:
@@ -303,24 +375,29 @@ class BinaryClassifier:
         if not self.is_trained:
             return {
                 "trained": False,
-                "message": "No model trained. Please collect data and train."
+                "message": "No model trained. Collect HOME samples and train."
             }
             
         return {
             "trained": True,
-            "accuracy": self.metadata.get("accuracy", 0),
-            "precision": self.metadata.get("precision", 0),
-            "recall": self.metadata.get("recall", 0),
-            "f1": self.metadata.get("f1", 0),
-            "total_samples": self.metadata.get("total_samples", 0),
+            "model_type": "One-Class Anomaly Detection",
             "home_samples": self.metadata.get("home_samples", 0),
-            "intruder_samples": self.metadata.get("intruder_samples", 0),
-            "classes": self.metadata.get("classes", [LABEL_HOME, LABEL_INTRUDER])
+            "training_accuracy": self.metadata.get("training_accuracy", 0),
+            "cv_accuracy": self.metadata.get("cv_accuracy_mean", 0),
+            "anomaly_threshold": self.metadata.get("anomaly_threshold", 0),
+            "has_svm_backup": self.metadata.get("has_svm_backup", False),
+            "note": "Detects intruders as anomalies - no intruder training data needed"
         }
 
 
+# Backward compatibility alias
+class BinaryClassifier(AnomalyDetector):
+    """Backward compatibility wrapper - redirects to AnomalyDetector."""
+    pass
+
+
 # Global instance for use by API
-ml_manager = BinaryClassifier()
+ml_manager = AnomalyDetector()
 
 
 # Legacy compatibility functions

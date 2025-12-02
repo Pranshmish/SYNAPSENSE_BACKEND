@@ -1,0 +1,185 @@
+======================================================================
+SYNAPSENSE FULL SYSTEM QA TEST REPORT
+======================================================================
+
+Test Run: 2025-12-02T13:24:55.325601
+Duration: 127.50 seconds
+Overall Pass Rate: 97.1%
+Total: 66 passed, 2 failed
+
+----------------------------------------------------------------------
+1_signal_acquisition: 11/11 passed
+----------------------------------------------------------------------
+  [PASS] Signal generation - soft_footstep
+         Details: Length: 200, Min: 2015.8, Max: 2081.5
+  [PASS] Signal generation - normal_footstep
+         Details: Length: 200, Min: 1933.6, Max: 2153.6
+  [PASS] Signal generation - hard_footstep
+         Details: Length: 200, Min: 1844.0, Max: 2284.8
+  [PASS] Signal generation - ambient_noise
+         Details: Length: 200, Min: 2044.2, Max: 2055.7
+  [PASS] Signal generation - table_tap
+         Details: Length: 200, Min: 1996.3, Max: 2646.6
+  [PASS] ADC values in valid range (0-4095)
+         Details: Min: 1844.0, Max: 2646.6
+  [PASS] Signal variation check - soft_footstep
+         Details: Std: 14.26
+  [PASS] Signal variation check - normal_footstep
+         Details: Std: 40.77
+  [PASS] Signal variation check - hard_footstep
+         Details: Std: 68.60
+  [PASS] Signal variation check - ambient_noise
+         Details: Std: 2.28
+  [PASS] Signal variation check - table_tap
+         Details: Std: 99.88
+
+----------------------------------------------------------------------
+2_step_detection: 6/6 passed
+----------------------------------------------------------------------
+  [PASS] Soft footstep detected
+         Details: Features: 77
+  [PASS] Normal footstep detected
+         Details: Features: 77
+  [PASS] Hard footstep detected
+         Details: Features: 77
+  [PASS] Ambient noise processed
+         Details: Features extracted: Yes
+  [PASS] Table tap processed
+         Details: Features extracted: Yes
+  [PASS] No double-triggering (consistent features)
+         Details: RMS diff: 0.000000
+
+----------------------------------------------------------------------
+3_dataset_saving: 4/4 passed
+----------------------------------------------------------------------
+  [PASS] HOME sample saved
+         Details: Features: 77
+  [PASS] Sample count updated
+         Details: Counts: {'HOME': 27, 'INTRUDER': 5}
+  [PASS] All samples retrievable
+         Details: Features: 32, Labels: 32
+  [PASS] Dataset directory exists
+         Details: Path: C:\Users\ASUS\Desktop\Synap-Webapp\backend\dataset
+
+----------------------------------------------------------------------
+4_feature_extraction: 14/14 passed
+----------------------------------------------------------------------
+  [PASS] LIF feature: lif_mid_spike_count
+         Details: Value: 15.0
+  [PASS] LIF feature: lif_mid_isi_mean
+         Details: Value: 35.714285714285715
+  [PASS] LIF feature: lif_mid_spike_rate
+         Details: Value: 15.0
+  [PASS] LIF spike count > 0
+         Details: Count: 15.0
+  [PASS] FFT feature: fft_centroid
+         Details: Value: 42.70586533620413
+  [PASS] FFT feature: fft_bass_energy
+         Details: Value: 0.002109061095882514
+  [PASS] FFT feature: fft_rolloff
+         Details: Value: 31.0
+  [PASS] FFT centroid in valid range (0-100 Hz)
+         Details: Value: 42.71
+  [PASS] Statistical feature: stat_rms
+         Details: Value: 0.3623399822242197
+  [PASS] Statistical feature: stat_mean
+         Details: Value: 0.0007038378556838024
+  [PASS] Statistical feature: stat_std
+         Details: Value: 0.36233929862839986
+  [PASS] Statistical feature: stat_peak_count
+         Details: Value: 49.0
+  [PASS] RMS approximately matches raw signal
+         Details: Feature RMS: 0.36, Raw RMS: 2048.78
+  [PASS] Total features >= 50
+         Details: Count: 77
+
+----------------------------------------------------------------------
+5_model_training: 8/8 passed
+----------------------------------------------------------------------
+  [PASS] HOME samples generated
+         Details: Count: 25
+  [PASS] Model training completed
+         Details: Result: OK
+  [PASS] Model marked as trained
+         Details: is_trained: True
+  [PASS] Scaler initialized
+         Details: Scaler: StandardScaler
+  [PASS] Isolation Forest initialized
+         Details: Model: IsolationForest
+  [PASS] Anomaly threshold calculated
+         Details: Threshold: -0.0000
+  [PASS] Training accuracy > 70%
+         Details: Accuracy: 96.0%
+  [PASS] Model file saved
+         Details: Path: models\home_detector_if.pkl
+
+----------------------------------------------------------------------
+6_predictions: 6/7 passed
+----------------------------------------------------------------------
+  [PASS] Model loaded
+         Details: Ready for predictions
+  [PASS] Soft HOME footstep → HOME
+         Details: Prediction: HOME, Confidence: 0.50
+  [PASS] Normal HOME footstep → HOME
+         Details: Prediction: HOME, Confidence: 0.67
+  [PASS] Hard HOME footstep → HOME
+         Details: Prediction: HOME, Confidence: 0.58
+  [FAIL] Unknown footstep → INTRUDER (anomaly)
+         Details: Prediction: HOME, Anomaly: False, Score: -0.0238
+  [PASS] Confidence score provided
+         Details: Confidence: 0.679
+  [PASS] Anomaly score in result
+         Details: Score: -0.0948
+
+----------------------------------------------------------------------
+7_backend_endpoints: 7/7 passed
+----------------------------------------------------------------------
+  [PASS] GET / (root)
+         Details: Status: 200, Mode: One-Class (HOME only training)
+  [PASS] GET /status
+         Details: Model: Ready, Type: One-Class Anomaly Detection
+  [PASS] POST /train_data
+         Details: Valid: 1
+  [PASS] POST /predictfootsteps
+         Details: Prediction: HOME
+  [PASS] POST /train
+         Details: Success: True
+  [PASS] GET /dataset
+         Details: Status: 200
+  [PASS] Error handling - invalid data
+         Details: Status: 400
+
+----------------------------------------------------------------------
+8_frontend_integration: 3/4 passed
+----------------------------------------------------------------------
+  [PASS] Status response format
+         Details: All fields present
+  [PASS] Prediction response format
+         Details: Fields: ['prediction', 'confidence', 'is_intruder', 'alert', 'probabilities']...
+  [FAIL] Prediction latency < 300ms
+         Details: Latency: 2122.5ms
+  [PASS] Train response has metrics/status
+         Details: Keys: ['success', 'samples_per_person', 'features_extracted', 'metrics', 'model_classes']...
+
+----------------------------------------------------------------------
+9_retraining: 3/3 passed
+----------------------------------------------------------------------
+  [PASS] New samples added
+         Details: Added: 5/5
+  [PASS] Retraining completed
+         Details: Accuracy: 97.06
+  [PASS] Anomaly threshold recalculated
+         Details: Threshold: -0.03896890729761937
+
+----------------------------------------------------------------------
+10_stress_tests: 4/4 passed
+----------------------------------------------------------------------
+  [PASS] Rapid predictions (20x)
+         Details: Success: 20/20, Avg: 2095.8ms
+  [PASS] Mixed signal handling
+         Details: Success: 15/15
+  [PASS] Batch upload (10 samples)
+         Details: Valid: 10, Time: 2.20s
+  [PASS] Continuous operation (5s)
+         Details: Operations: 3, Errors: 0
+

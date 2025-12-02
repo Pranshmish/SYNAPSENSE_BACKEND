@@ -1,0 +1,120 @@
+======================================================================
+SYNAPSENSE FULL SYSTEM QA TEST REPORT
+======================================================================
+
+Test Run: 2025-12-02T13:21:04.824424
+Duration: 127.15 seconds
+Overall Pass Rate: 95.6%
+Total: 65 passed, 3 failed
+
+----------------------------------------------------------------------
+1_signal_acquisition: 11/11 passed
+----------------------------------------------------------------------
+  [PASS] Signal generation - soft_footstep
+         Details: Length: 200, Min: 2028.2, Max: 2068.3
+  [PASS] Signal generation - normal_footstep
+         Details: Length: 200, Min: 1948.9, Max: 2160.2
+  [PASS] Signal generation - hard_footstep
+         Details: Length: 200, Min: 1845.1, Max: 2245.6
+  [PASS] Signal generation - ambient_noise
+         Details: Length: 200, Min: 2041.9, Max: 2054.4
+  [PASS] Signal generation - table_tap
+         Details: Length: 200, Min: 1998.8, Max: 2631.8
+  [PASS] ADC values in valid range (0-4095)
+         Details: Min: 1845.1, Max: 2631.8
+  [PASS] Signal variation check - soft_footstep
+         Details: Std: 8.39
+  [PASS] Signal variation check - normal_footstep
+         Details: Std: 39.40
+  [PASS] Signal variation check - hard_footstep
+         Details: Std: 67.11
+  [PASS] Signal variation check - ambient_noise
+         Details: Std: 2.14
+  [PASS] Signal variation check - table_tap
+         Details: Std: 100.59
+
+----------------------------------------------------------------------
+2_step_detection: 6/6 passed
+----------------------------------------------------------------------
+  [PASS] Soft footstep detected
+         Details: Features: 77
+  [PASS] Normal footstep detected
+         Details: Features: 77
+  [PASS] Hard footstep detected
+         Details: Features: 77
+  [PASS] Ambient noise processed
+         Details: Features extracted: Yes
+  [PASS] Table tap processed
+         Details: Features extracted: Yes
+  [PASS] No double-triggering (consistent features)
+         Details: RMS diff: 0.000000
+
+----------------------------------------------------------------------
+3_dataset_saving: 3/4 passed
+----------------------------------------------------------------------
+  [FAIL] HOME sample saved
+         Details: Features: 77
+  [PASS] Sample count updated
+         Details: Counts: {'HOME': 7, 'INTRUDER': 5}
+  [PASS] All samples retrievable
+         Details: Features: 12, Labels: 12
+  [PASS] Dataset directory exists
+         Details: Path: C:\Users\ASUS\Desktop\Synap-Webapp\backend\dataset
+
+----------------------------------------------------------------------
+4_feature_extraction: 13/14 passed
+----------------------------------------------------------------------
+  [PASS] LIF feature: lif_mid_spike_count
+         Details: Value: 7.0
+  [PASS] LIF feature: lif_mid_isi_mean
+         Details: Value: 67.5
+  [PASS] LIF feature: lif_mid_spike_rate
+         Details: Value: 7.0
+  [PASS] LIF spike count > 0
+         Details: Count: 7.0
+  [PASS] FFT feature: fft_centroid
+         Details: Value: 32.81952368939332
+  [PASS] FFT feature: fft_bass_energy
+         Details: Value: 0.18991831248268934
+  [FAIL] FFT feature: fft_spectral_rolloff
+         Details: Value: N/A
+  [PASS] FFT centroid in valid range (0-100 Hz)
+         Details: Value: 32.82
+  [PASS] Statistical feature: stat_rms
+         Details: Value: 0.32758421974723734
+  [PASS] Statistical feature: stat_mean
+         Details: Value: 0.001552818444918676
+  [PASS] Statistical feature: stat_std
+         Details: Value: 0.32758053938273474
+  [PASS] Statistical feature: stat_peak_count
+         Details: Value: 34.0
+  [PASS] RMS approximately matches raw signal
+         Details: Feature RMS: 0.33, Raw RMS: 2048.97
+  [PASS] Total features >= 50
+         Details: Count: 77
+
+----------------------------------------------------------------------
+5_model_training: 8/8 passed
+----------------------------------------------------------------------
+  [PASS] HOME samples generated
+         Details: Count: 25
+  [PASS] Model training completed
+         Details: Result: OK
+  [PASS] Model marked as trained
+         Details: is_trained: True
+  [PASS] Scaler initialized
+         Details: Scaler: StandardScaler
+  [PASS] Isolation Forest initialized
+         Details: Model: IsolationForest
+  [PASS] Anomaly threshold calculated
+         Details: Threshold: 0.0042
+  [PASS] Training accuracy > 70%
+         Details: Accuracy: 96.0%
+  [PASS] Model file saved
+         Details: Path: models\home_detector_if.pkl
+
+----------------------------------------------------------------------
+6_predictions: 7/7 passed
+----------------------------------------------------------------------
+  [PASS] Model loaded
+         Details: Ready for predictions

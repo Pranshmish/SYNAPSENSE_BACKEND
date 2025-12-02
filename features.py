@@ -183,21 +183,20 @@ class FootstepFeatureExtractor:
             return data / max_val
         return data
         
-    def validate_chunk(self, data: np.ndarray, min_std: float = 0.005, 
-                       max_dc: float = 0.8) -> bool:
+    def validate_chunk(self, data: np.ndarray, min_std: float = 0.0001) -> bool:
         """
         Validate that the chunk contains meaningful footstep signal.
-        Rejects noise-only or flatline chunks.
+        VERY lenient - only rejects completely flat signals.
+        DC ratio check REMOVED as ADC data is naturally positive (0-4095).
         """
-        if len(data) < 50:
+        if len(data) < 20:  # Reduced minimum length
             return False
             
-        std = np.std(data)
-        mean_abs = np.mean(np.abs(data))
-        dc_ratio = abs(np.mean(data)) / (mean_abs + 1e-10)
+        data_std = np.std(data)
         
-        # Check for sufficient variation and not too much DC bias
-        return std > min_std and dc_ratio < max_dc
+        # Only reject completely flat signals (no variation at all)
+        # No DC ratio check - ADC values are naturally positive!
+        return data_std > min_std
         
     def extract_statistical_features(self, data: np.ndarray) -> Dict[str, float]:
         """
@@ -345,9 +344,12 @@ class FootstepFeatureExtractor:
         # Convert to numpy array
         data = np.array(raw_data, dtype=np.float64)
         
-        # Validate chunk
+        # Validate chunk - now very lenient
         if not self.validate_chunk(data):
+            print(f"[FEATURES] Validation failed: len={len(data)}, std={np.std(data):.4f}")
             return None
+        
+        print(f"[FEATURES] Validation OK: len={len(data)}, std={np.std(data):.2f}, mean={np.mean(data):.2f}")
             
         # Apply bandpass filter
         filtered = self.butterworth_filter(data)
@@ -356,12 +358,20 @@ class FootstepFeatureExtractor:
         normalized = self.normalize_signal(filtered)
         
         # Extract all feature sets
-        features = {}
-        features.update(self.extract_statistical_features(normalized))
-        features.update(self.extract_fft_features(normalized))
-        features.update(self.extract_lif_features(normalized))
-        
-        return features
+        try:
+            features = {}
+            features.update(self.extract_statistical_features(normalized))
+            features.update(self.extract_fft_features(normalized))
+            features.update(self.extract_lif_features(normalized))
+            
+            # Convert all numpy types to Python native types for JSON serialization
+            features = {k: float(v) if hasattr(v, 'item') else float(v) for k, v in features.items()}
+            
+            print(f"[FEATURES] ✓ Extracted {len(features)} features")
+            return features
+        except Exception as e:
+            print(f"[FEATURES] ✗ Feature extraction error: {e}")
+            return None
         
     def extract_features_batch(self, samples_list: List[List[float]]) -> List[Dict[str, float]]:
         """

@@ -1,6 +1,7 @@
 """
-FastAPI Backend for Binary HOME vs INTRUDER Footstep Classification
-Supports data collection, training, prediction, and dataset management.
+FastAPI Backend for One-Class Anomaly Detection Footstep Recognition
+Trains ONLY on HOME samples - detects intruders as anomalies.
+No intruder training data required!
 """
 
 from fastapi import FastAPI, HTTPException, Path, UploadFile, File
@@ -24,9 +25,9 @@ from io import BytesIO
 from models import TrainDataRequest, TrainResponse, PredictRequest, PredictResponse, StatusResponse
 from features import FootstepFeatureExtractor, FEATURE_NAMES, extract_features
 from storage import StorageManager
-from ml import BinaryClassifier, LABEL_HOME, LABEL_INTRUDER
+from ml import AnomalyDetector, LABEL_HOME, LABEL_INTRUDER
 
-app = FastAPI(title="SynapSense - Binary Footstep Classifier")
+app = FastAPI(title="SynapSense - Anomaly Detection Footstep Recognizer")
 
 # CORS
 app.add_middleware(
@@ -40,7 +41,7 @@ app.add_middleware(
 # Initialize components
 extractor = FootstepFeatureExtractor()
 storage = StorageManager()
-classifier = BinaryClassifier()
+classifier = AnomalyDetector()  # One-class anomaly detection
 
 # Static files
 os.makedirs("static", exist_ok=True)
@@ -51,9 +52,10 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def root():
     """Health check endpoint."""
     return {
-        "message": "SynapSense Binary Classifier Backend",
-        "version": "2.0",
-        "mode": "HOME vs INTRUDER"
+        "message": "SynapSense Anomaly Detection Backend",
+        "version": "3.0",
+        "mode": "One-Class (HOME only training)",
+        "note": "Intruders detected as anomalies - no intruder training needed"
     }
 
 
@@ -66,11 +68,12 @@ async def get_status():
     return StatusResponse(
         samples_per_person=counts,
         model_status="Ready" if model_status.get("trained", False) else "Not Trained",
-        classes=[LABEL_HOME, LABEL_INTRUDER],
-        intruder_threshold=0.5,
-        accuracy=model_status.get("accuracy"),
+        classes=[LABEL_HOME],  # Only HOME class for training
+        intruder_threshold=model_status.get("anomaly_threshold", 0.5),
+        accuracy=model_status.get("training_accuracy"),
         home_samples=model_status.get("home_samples", counts.get("HOME", 0)),
-        intruder_samples=model_status.get("intruder_samples", counts.get("INTRUDER", 0))
+        intruder_samples=counts.get("INTRUDER", 0),  # For display only, not used in training
+        model_type=model_status.get("model_type", "One-Class Anomaly Detection")
     )
 
 
@@ -83,62 +86,79 @@ async def train_data(request: TrainDataRequest):
     - "HOME" or "HOME_SAMPLE" for home user footsteps
     - "INTRUDER" or "INTRUDER_SAMPLE" for intruder footsteps
     """
-    # Normalize label to binary
-    label = request.label.upper()
-    if label in ["HOME", "HOME_SAMPLE"]:
-        binary_label = LABEL_HOME
-    else:
-        binary_label = LABEL_INTRUDER
-        
-    extracted_features_list = []
-    valid_samples = 0
-    
-    # Process each chunk
-    for item in request.data:
-        raw_chunk = item.get("raw_time_series")
-        if not raw_chunk or len(raw_chunk) < 50:
-            continue
-            
-        # Extract features with validation
-        features = extractor.process_chunk(raw_chunk)
-        
-        if features:
-            # Save valid sample
-            storage.save_sample(binary_label, features)
-            extracted_features_list.append(list(features.values()))
-            valid_samples += 1
-    
-    # Get updated counts
-    counts = storage.get_sample_counts()
-    
-    metrics = None
-    model_classes = [LABEL_HOME, LABEL_INTRUDER]
-    
-    if request.train_model:
-        # Load all data for training
-        all_features, all_labels = storage.get_all_samples()
-        
-        if len(all_features) >= 10:
-            train_result = classifier.train(all_features, all_labels)
-            
-            if train_result.get("success", False):
-                metrics = train_result.get("metrics", {})
-                metrics["confusion_matrix"] = train_result.get("confusion_matrix")
-                metrics["top_features"] = train_result.get("top_features")
-            else:
-                metrics = {"error": train_result.get("error", "Training failed")}
+    try:
+        # Normalize label to binary
+        label = request.label.upper()
+        if label in ["HOME", "HOME_SAMPLE"]:
+            binary_label = LABEL_HOME
         else:
-            metrics = {"error": f"Need at least 10 samples. Current: {len(all_features)}"}
+            binary_label = LABEL_INTRUDER
             
-    return TrainResponse(
-        success=valid_samples > 0,
-        samples_per_person=counts,
-        features_extracted=extracted_features_list if extracted_features_list else None,
-        metrics=metrics,
-        model_classes=model_classes,
-        valid_samples=valid_samples,
-        label_used=binary_label
-    )
+        extracted_features_list = []
+        valid_samples = 0
+        rejected_chunks = 0
+        
+        # Process each chunk
+        for item in request.data:
+            raw_chunk = item.get("raw_time_series")
+            if not raw_chunk or len(raw_chunk) < 20:  # Lowered from 50 to 20
+                rejected_chunks += 1
+                print(f"[TRAIN] Rejected chunk: len={len(raw_chunk) if raw_chunk else 0}")
+                continue
+                
+            # Extract features with validation
+            features = extractor.process_chunk(raw_chunk)
+            
+            if features:
+                # Save valid sample
+                storage.save_sample(binary_label, features)
+                extracted_features_list.append(list(features.values()))
+                valid_samples += 1
+                print(f"[TRAIN] ✓ Saved sample #{valid_samples} for {binary_label}")
+            else:
+                rejected_chunks += 1
+                import numpy as np
+                data = np.array(raw_chunk)
+                print(f"[TRAIN] ✗ Feature extraction failed: len={len(raw_chunk)}, std={np.std(data):.6f}, mean={np.mean(data):.2f}")
+        
+        print(f"[TRAIN] Result: {valid_samples} saved, {rejected_chunks} rejected for label={binary_label}")
+        
+        # Get updated counts
+        counts = storage.get_sample_counts()
+        
+        metrics = None
+        model_classes = [LABEL_HOME, LABEL_INTRUDER]
+        
+        if request.train_model:
+            # Load all data for training
+            all_features, all_labels = storage.get_all_samples()
+            
+            if len(all_features) >= 10:
+                train_result = classifier.train(all_features, all_labels)
+                
+                if train_result.get("success", False):
+                    metrics = train_result.get("metrics", {})
+                    metrics["confusion_matrix"] = train_result.get("confusion_matrix")
+                    metrics["top_features"] = train_result.get("top_features")
+                else:
+                    metrics = {"error": train_result.get("error", "Training failed")}
+            else:
+                metrics = {"error": f"Need at least 10 samples. Current: {len(all_features)}"}
+                
+        return TrainResponse(
+            success=valid_samples > 0,
+            samples_per_person=counts,
+            features_extracted=extracted_features_list if extracted_features_list else None,
+            metrics=metrics,
+            model_classes=model_classes,
+            valid_samples=valid_samples,
+            label_used=binary_label
+        )
+    except Exception as e:
+        import traceback
+        print(f"[TRAIN] ERROR: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/predictfootsteps", response_model=PredictResponse)
