@@ -1,23 +1,32 @@
-from fastapi import FastAPI, HTTPException, Path
+"""
+FastAPI Backend for Binary HOME vs INTRUDER Footstep Classification
+Supports data collection, training, prediction, and dataset management.
+"""
+
+from fastapi import FastAPI, HTTPException, Path, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
 import uvicorn
 import os
 import shutil
 import glob
+import json
 import sqlite3
 import pandas as pd
+import numpy as np
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+import zipfile
+import tempfile
+from io import BytesIO
 
 from models import TrainDataRequest, TrainResponse, PredictRequest, PredictResponse, StatusResponse
-from features import FootstepFeatureExtractor
+from features import FootstepFeatureExtractor, FEATURE_NAMES, extract_features
 from storage import StorageManager
-from ml import MLManager
+from ml import BinaryClassifier, LABEL_HOME, LABEL_INTRUDER
 
-app = FastAPI(title="Footstep ML Pipeline Backend")
-
-PERSONS = ['Pranshul', 'Aditi', 'Apurv', 'Samir', 'Intruder']
+app = FastAPI(title="SynapSense - Binary Footstep Classifier")
 
 # CORS
 app.add_middleware(
@@ -28,153 +37,219 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Managers
+# Initialize components
 extractor = FootstepFeatureExtractor()
 storage = StorageManager()
-ml_manager = MLManager()
+classifier = BinaryClassifier()
 
-# Static mount for health check or simple UI if needed
+# Static files
 os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
 @app.get("/")
 async def root():
-    return {"message": "Footstep ML Pipeline Backend is running"}
+    """Health check endpoint."""
+    return {
+        "message": "SynapSense Binary Classifier Backend",
+        "version": "2.0",
+        "mode": "HOME vs INTRUDER"
+    }
+
 
 @app.get("/status", response_model=StatusResponse)
 async def get_status():
+    """Get current system status including sample counts and model state."""
     counts = storage.get_sample_counts()
-    model_status = "Ready" if ml_manager.rf else "Not Trained"
-    classes = list(ml_manager.rf.classes_) if ml_manager.rf else []
+    model_status = classifier.get_status()
+    
     return StatusResponse(
-        samples_per_person=counts, 
-        model_status=model_status,
-        classes=classes,
-        intruder_threshold=0.75
+        samples_per_person=counts,
+        model_status="Ready" if model_status.get("trained", False) else "Not Trained",
+        classes=[LABEL_HOME, LABEL_INTRUDER],
+        intruder_threshold=0.5,
+        accuracy=model_status.get("accuracy"),
+        home_samples=model_status.get("home_samples", counts.get("HOME", 0)),
+        intruder_samples=model_status.get("intruder_samples", counts.get("INTRUDER", 0))
     )
+
 
 @app.post("/train_data", response_model=TrainResponse)
 async def train_data(request: TrainDataRequest):
-    extracted_features_list = []
+    """
+    Process training data and optionally train the model.
     
-    # Process chunks
+    Labels should be:
+    - "HOME" or "HOME_SAMPLE" for home user footsteps
+    - "INTRUDER" or "INTRUDER_SAMPLE" for intruder footsteps
+    """
+    # Normalize label to binary
+    label = request.label.upper()
+    if label in ["HOME", "HOME_SAMPLE"]:
+        binary_label = LABEL_HOME
+    else:
+        binary_label = LABEL_INTRUDER
+        
+    extracted_features_list = []
+    valid_samples = 0
+    
+    # Process each chunk
     for item in request.data:
         raw_chunk = item.get("raw_time_series")
-        if not raw_chunk:
+        if not raw_chunk or len(raw_chunk) < 50:
             continue
             
-        # Extract features (includes validation)
+        # Extract features with validation
         features = extractor.process_chunk(raw_chunk)
         
         if features:
-            # Save if valid
-            storage.save_sample(request.label, features)
+            # Save valid sample
+            storage.save_sample(binary_label, features)
             extracted_features_list.append(list(features.values()))
+            valid_samples += 1
     
     # Get updated counts
     counts = storage.get_sample_counts()
     
     metrics = None
+    model_classes = [LABEL_HOME, LABEL_INTRUDER]
+    
     if request.train_model:
         # Load all data for training
         all_features, all_labels = storage.get_all_samples()
-        if len(all_features) > 0:
-            metrics = ml_manager.train(all_features, all_labels)
+        
+        if len(all_features) >= 10:
+            train_result = classifier.train(all_features, all_labels)
+            
+            if train_result.get("success", False):
+                metrics = train_result.get("metrics", {})
+                metrics["confusion_matrix"] = train_result.get("confusion_matrix")
+                metrics["top_features"] = train_result.get("top_features")
+            else:
+                metrics = {"error": train_result.get("error", "Training failed")}
         else:
-            metrics = {"error": "No data available for training"}
+            metrics = {"error": f"Need at least 10 samples. Current: {len(all_features)}"}
             
     return TrainResponse(
-        success=True,
+        success=valid_samples > 0,
         samples_per_person=counts,
         features_extracted=extracted_features_list if extracted_features_list else None,
-        metrics=metrics
+        metrics=metrics,
+        model_classes=model_classes,
+        valid_samples=valid_samples,
+        label_used=binary_label
     )
+
 
 @app.post("/predictfootsteps", response_model=PredictResponse)
 async def predict_footsteps(request: PredictRequest):
-    # Extract features from single chunk
+    """
+    Predict whether footstep is HOME or INTRUDER.
+    Returns prediction with confidence and probability distribution.
+    """
+    # Extract features from chunk
     features_dict = extractor.process_chunk(request.data)
     
     if not features_dict:
-        raise HTTPException(status_code=400, detail="Invalid chunk or noise detected")
-        
-    # Convert dict values to list (ensure order matches ML expectation)
-    # features.py returns dict. ml.py expects list of floats for predict.
-    # We need to ensure order. 
-    # Ideally features.py should return both or we use the keys from ml.py
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid signal - could not extract features. May be noise or flatline."
+        )
     
-    # Let's use the keys defined in ml.py to be safe
-    from ml import FEATURE_NAMES
+    # Convert to feature vector (ordered)
     features_list = [features_dict.get(k, 0.0) for k in FEATURE_NAMES]
     
-    result = ml_manager.predict(features_list)
+    # Get prediction
+    result = classifier.predict(features_list)
     
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
-        
+    if not result.get("success", False):
+        # Model not trained - return error response
+        raise HTTPException(
+            status_code=400,
+            detail=result.get("error", "Prediction failed. Model may not be trained.")
+        )
+    
     prediction = result["prediction"]
     confidence = result["confidence"]
+    is_intruder = result["is_intruder"]
     probabilities = result["probabilities"]
     
-    # INTRUDER LOGIC
-    is_intruder = False
-    alert_msg = ''
-    
-    if prediction == 'Intruder' or confidence < 0.75:
-        is_intruder = True
-        alert_msg = '🚨 INTRUDER DETECTED!'
-        # If low confidence, force prediction to show as Intruder logic might imply
-        # But user wants "prediction" to be the person OR Intruder.
-        # If confidence < 0.75, should we change prediction to "Intruder"?
-        # User example: "low_confidence_intruder": {"prediction": "Pranshul", "confidence": 0.72, "is_intruder": true...}
-        # So we keep the original prediction but flag it.
+    # Generate alert message
+    if is_intruder:
+        if confidence > 0.8:
+            alert = f"🚨 INTRUDER DETECTED (High Confidence: {confidence:.1%})"
+        else:
+            alert = f"⚠️ Possible Intruder ({confidence:.1%} confidence)"
     else:
-        is_intruder = False
-        alert_msg = f'✅ Family: {prediction}'
-        
+        if confidence > 0.8:
+            alert = f"✅ HOME User Verified ({confidence:.1%})"
+        else:
+            alert = f"🏠 Likely Home User ({confidence:.1%} confidence)"
+    
     return PredictResponse(
         prediction=prediction,
         confidence=confidence,
         is_intruder=is_intruder,
-        alert=alert_msg,
+        alert=alert,
         probabilities=probabilities
     )
 
-@app.post('/reset_model')
+
+@app.post("/reset_model")
 async def reset_model():
+    """Reset all data: models, dataset, and database."""
     deleted_samples = 0
     deleted_persons = 0
+    
+    # Count what will be deleted
     if os.path.exists('dataset'):
         for person_dir in os.listdir('dataset'):
-            if os.path.isdir(f'dataset/{person_dir}'):
-                csv_files = glob.glob(f'dataset/{person_dir}/*.csv')
+            person_path = f'dataset/{person_dir}'
+            if os.path.isdir(person_path):
+                csv_files = glob.glob(f'{person_path}/*.csv')
                 for csv_file in csv_files:
                     try:
                         df = pd.read_csv(csv_file)
                         deleted_samples += len(df)
-                    except: pass
+                    except:
+                        pass
                 deleted_persons += 1
+    
+    # Clear everything
     shutil.rmtree('dataset', ignore_errors=True)
     shutil.rmtree('models', ignore_errors=True)
+    
     if os.path.exists('db/samples.db'):
         try:
             os.remove('db/samples.db')
-        except: pass
+        except:
+            pass
     
-    # Re-init directories
+    # Re-initialize
     os.makedirs('dataset', exist_ok=True)
     os.makedirs('models', exist_ok=True)
     os.makedirs('db', exist_ok=True)
     
-    # Re-init DB
     storage._init_db()
+    classifier.reset()
     
-    return {'success': True, 'reset_time': datetime.now().isoformat(), 'deleted': {'samples': deleted_samples, 'persons': deleted_persons}}
+    return {
+        'success': True,
+        'reset_time': datetime.now().isoformat(),
+        'deleted': {
+            'samples': deleted_samples,
+            'persons': deleted_persons
+        },
+        'message': 'All data and models cleared successfully'
+    }
 
-@app.get('/dataset')
+
+@app.get("/dataset")
 async def get_dataset_status():
+    """Get overview of stored dataset."""
     persons = []
     total_samples = 0
+    
     if os.path.exists('dataset'):
         for person_dir in os.listdir('dataset'):
             person_path = f'dataset/{person_dir}'
@@ -183,32 +258,206 @@ async def get_dataset_status():
                 sample_count = 0
                 for f in csv_files:
                     try:
-                        sample_count += len(pd.read_csv(f).values)
-                    except: pass
-                persons.append({'name': person_dir, 'samples': sample_count})
+                        df = pd.read_csv(f)
+                        sample_count += len(df)
+                    except:
+                        pass
+                persons.append({
+                    'name': person_dir,
+                    'samples': sample_count,
+                    'type': 'HOME' if person_dir == 'HOME' else 'INTRUDER'
+                })
                 total_samples += sample_count
-    model_trained = os.path.exists('models/svm_model.pkl')
-    return {'persons': persons, 'total_samples': total_samples, 'model_status': 'trained' if model_trained else 'needs_training'}
+    
+    model_trained = classifier.is_trained
+    model_status = classifier.get_status()
+    
+    return {
+        'persons': persons,
+        'total_samples': total_samples,
+        'model_status': 'trained' if model_trained else 'needs_training',
+        'model_accuracy': model_status.get('accuracy') if model_trained else None,
+        'classes': [LABEL_HOME, LABEL_INTRUDER]
+    }
 
-@app.delete('/dataset/{person}')
+
+@app.delete("/dataset/{person}")
 async def delete_person_dataset(person: str = Path(...)):
+    """Delete dataset for a specific person/label."""
     person_path = f'dataset/{person}'
     deleted_samples = 0
+    
     if os.path.exists(person_path):
         csv_files = glob.glob(f'{person_path}/*.csv')
         for csv_file in csv_files:
             try:
                 df = pd.read_csv(csv_file)
                 deleted_samples += len(df)
-            except: pass
+            except:
+                pass
         shutil.rmtree(person_path, ignore_errors=True)
     
-    conn = sqlite3.connect('db/samples.db')
-    conn.execute('DELETE FROM samples WHERE person=?', (person,))
-    conn.commit()
-    conn.close()
+    # Also delete from database
+    try:
+        conn = sqlite3.connect('db/samples.db')
+        conn.execute('DELETE FROM samples WHERE person=?', (person,))
+        conn.commit()
+        conn.close()
+    except:
+        pass
     
-    return {'success': True, 'message': f'Deleted {person} ({deleted_samples} samples)'}
+    return {
+        'success': True,
+        'message': f'Deleted {person} ({deleted_samples} samples)'
+    }
+
+
+@app.get("/dataset/download")
+async def download_dataset():
+    """Download complete dataset as ZIP file."""
+    if not os.path.exists('dataset'):
+        raise HTTPException(status_code=404, detail="No dataset found")
+    
+    # Check if there's any data
+    has_data = False
+    for person_dir in os.listdir('dataset'):
+        if os.path.isdir(f'dataset/{person_dir}'):
+            if glob.glob(f'dataset/{person_dir}/*.csv'):
+                has_data = True
+                break
+    
+    if not has_data:
+        raise HTTPException(status_code=404, detail="Dataset is empty")
+    
+    # Create ZIP file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_filename = f"synapsense_dataset_{timestamp}.zip"
+    zip_path = f"static/{zip_filename}"
+    
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for person_dir in os.listdir('dataset'):
+            person_path = f'dataset/{person_dir}'
+            if os.path.isdir(person_path):
+                csv_files = glob.glob(f'{person_path}/*.csv')
+                for csv_file in csv_files:
+                    arcname = csv_file.replace('dataset/', '')
+                    zipf.write(csv_file, arcname)
+    
+    return FileResponse(
+        zip_path,
+        media_type='application/zip',
+        filename=zip_filename,
+        headers={"Content-Disposition": f"attachment; filename={zip_filename}"}
+    )
+
+
+@app.post("/dataset/upload")
+async def upload_dataset(file: UploadFile = File(...)):
+    """
+    Upload a dataset ZIP file to restore/merge data.
+    ZIP should contain folders (HOME/, INTRUDER/) with CSV files.
+    """
+    if not file.filename.endswith('.zip'):
+        raise HTTPException(status_code=400, detail="Only ZIP files are supported")
+    
+    # Save uploaded file
+    content = await file.read()
+    
+    try:
+        with zipfile.ZipFile(BytesIO(content), 'r') as zipf:
+            # Validate structure
+            file_list = zipf.namelist()
+            csv_files = [f for f in file_list if f.endswith('.csv')]
+            
+            if not csv_files:
+                raise HTTPException(status_code=400, detail="No CSV files found in ZIP")
+            
+            imported_count = 0
+            
+            for csv_path in csv_files:
+                # Extract label from path (e.g., HOME/features_HOME.csv -> HOME)
+                parts = csv_path.split('/')
+                if len(parts) >= 2:
+                    label = parts[0].upper()
+                else:
+                    # Try to infer from filename
+                    if 'home' in csv_path.lower():
+                        label = LABEL_HOME
+                    else:
+                        label = LABEL_INTRUDER
+                
+                # Normalize to binary labels
+                if label not in [LABEL_HOME, LABEL_INTRUDER]:
+                    if label in ['HOME_SAMPLE', 'HOME']:
+                        label = LABEL_HOME
+                    else:
+                        label = LABEL_INTRUDER
+                
+                # Read CSV
+                with zipf.open(csv_path) as csv_file:
+                    try:
+                        df = pd.read_csv(csv_file)
+                        
+                        # Save each row as a sample
+                        for _, row in df.iterrows():
+                            features = row.to_dict()
+                            storage.save_sample(label, features)
+                            imported_count += 1
+                    except Exception as e:
+                        print(f"Error reading {csv_path}: {e}")
+                        continue
+            
+            counts = storage.get_sample_counts()
+            
+            return {
+                'success': True,
+                'imported_samples': imported_count,
+                'samples_per_person': counts,
+                'message': f'Successfully imported {imported_count} samples'
+            }
+            
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="Invalid ZIP file")
+
+
+@app.post("/train")
+async def train_model():
+    """
+    Explicitly train the model using all stored data.
+    Separate endpoint from train_data for manual control.
+    """
+    all_features, all_labels = storage.get_all_samples()
+    
+    if len(all_features) < 10:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Not enough data. Need at least 10 samples, have {len(all_features)}"
+        )
+    
+    result = classifier.train(all_features, all_labels)
+    
+    if not result.get("success", False):
+        raise HTTPException(
+            status_code=400,
+            detail=result.get("error", "Training failed")
+        )
+    
+    return result
+
+
+@app.get("/model/features")
+async def get_feature_names():
+    """Get list of features used by the model."""
+    return {
+        "feature_count": len(FEATURE_NAMES),
+        "features": FEATURE_NAMES,
+        "categories": {
+            "statistical": [f for f in FEATURE_NAMES if f.startswith("stat_")],
+            "fft": [f for f in FEATURE_NAMES if f.startswith("fft_")],
+            "lif": [f for f in FEATURE_NAMES if f.startswith("lif_")]
+        }
+    }
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
