@@ -58,6 +58,7 @@ class PredictResponse(BaseModel):
     svm_agrees: Optional[bool] = None  # Whether SVM backup agrees
     binary_prediction: Optional[str] = None  # Binary model prediction if available
     z_score: Optional[float] = None  # Normalized anomaly score
+    intruder_reason: Optional[str] = None  # Reason for intruder classification
 
 
 class StatusResponse(BaseModel):

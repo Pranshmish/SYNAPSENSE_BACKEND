@@ -14,7 +14,7 @@ import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks, savgol_filter
 from scipy.fft import fft, fftfreq, dct
 from scipy.ndimage import gaussian_filter1d
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -183,7 +183,7 @@ class FootstepFeatureExtractor:
                           highcut: float = 95.0, order: int = 4) -> np.ndarray:
         """
         Apply Butterworth bandpass filter to isolate footstep frequencies.
-        Widened range (8-95Hz) to capture full footstep spectrum.
+        Range: 12-180Hz (Matches frontend graph logic).
         """
         low = lowcut / self.nyquist
         high = min(highcut / self.nyquist, 0.99)
@@ -196,6 +196,30 @@ class FootstepFeatureExtractor:
             return filtfilt(b, a, data)
         except Exception:
             return data
+
+    def apply_frontend_processing(self, data: np.ndarray) -> Tuple[np.ndarray, bool]:
+        """
+        Apply exact processing chain used by frontend graph:
+        1. Spike Multiplier (0.8x)
+        2. Bandpass Filter (12-180 Hz)
+        3. Amplitude Gate (>= 60 ADC)
+        
+        Returns:
+            Tuple[filtered_data, is_valid]
+        """
+        # 1. Apply Spike Multiplier (0.8x)
+        data = data * 0.8
+        
+        # 2. Apply Bandpass Filter (12-180 Hz)
+        filtered = self.butterworth_filter(data, lowcut=12.0, highcut=180.0)
+        
+        # 3. Apply Amplitude Gate (>= 60 ADC)
+        # Check if peak amplitude exceeds gate
+        peak_amplitude = np.max(np.abs(filtered))
+        if peak_amplitude < 60:
+            return filtered, False
+            
+        return filtered, True
             
     def normalize_signal(self, data: np.ndarray) -> np.ndarray:
         """Normalize signal to [-1, 1] range for consistent processing."""
@@ -515,31 +539,35 @@ class FootstepFeatureExtractor:
             return 0
         return np.mean(((data - mean) / std) ** 4) - 3
         
-    def process_chunk(self, raw_data: List[float]) -> Optional[Dict[str, float]]:
+    def process_chunk(self, raw_data: List[float]) -> Optional[Dict[str, Any]]:
         """
         Process a chunk of raw ADC samples and extract all features.
         Returns None if chunk is invalid.
         
-        Pipeline:
-        1. Validate chunk
-        2. Apply bandpass filter (8-95Hz)
-        3. Apply adaptive gain normalization
-        4. Extract statistical, FFT, MFCC, and LIF features
+        Pipeline (Matches Frontend):
+        1. Apply Spike Multiplier (0.8x)
+        2. Apply Bandpass Filter (12-180 Hz)
+        3. Apply Amplitude Gate (>= 60 ADC)
+        4. Extract features from FILTERED waveform
         """
         # Convert to numpy array
         data = np.array(raw_data, dtype=np.float64)
         
-        # Validate chunk - now very lenient
-        if not self.validate_chunk(data):
-            print(f"[FEATURES] Validation failed: len={len(data)}, std={np.std(data):.4f}")
+        # Apply frontend-matched processing
+        filtered, is_valid = self.apply_frontend_processing(data)
+        
+        if not is_valid:
+            print(f"[FEATURES] Rejected by Amplitude Gate (< 60 ADC): peak={np.max(np.abs(filtered)):.2f}")
+            return None
+            
+        # Validate chunk length
+        if len(filtered) < 20:
             return None
         
-        print(f"[FEATURES] Validation OK: len={len(data)}, std={np.std(data):.2f}, mean={np.mean(data):.2f}")
-            
-        # Apply bandpass filter (widened to 8-95Hz)
-        filtered = self.butterworth_filter(data, lowcut=8.0, highcut=95.0)
+        print(f"[FEATURES] Validation OK: len={len(filtered)}, peak={np.max(np.abs(filtered)):.2f}")
         
         # Apply adaptive gain normalization (helps with low/medium vibration)
+        # Note: We use the filtered data for this
         normalized = self.adaptive_gain_normalize(filtered)
         
         # Extract all feature sets
@@ -547,11 +575,14 @@ class FootstepFeatureExtractor:
             features = {}
             features.update(self.extract_statistical_features(normalized))
             features.update(self.extract_fft_features(normalized))
-            features.update(self.extract_mfcc_features(normalized))  # NEW: MFCC features
+            features.update(self.extract_mfcc_features(normalized))
             features.update(self.extract_lif_features(normalized))
             
             # Convert all numpy types to Python native types for JSON serialization
             features = {k: float(v) if hasattr(v, 'item') else float(v) for k, v in features.items()}
+            
+            # Add the filtered waveform to the result so it can be saved
+            features['_filtered_waveform'] = filtered.tolist()
             
             print(f"[FEATURES] ✓ Extracted {len(features)} features")
             return features
