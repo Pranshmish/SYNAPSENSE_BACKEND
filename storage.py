@@ -42,7 +42,9 @@ class StorageManager:
         1. Saves to main HOME.csv (for HOME/INTRUDER classification)
         2. Saves to individual HOME_{person}.csv (for person identification)
         
-        Example: "HOME_Apurv" → saves to:
+        ALL data is treated as HOME (INTRUDER is detected by MLP, not stored).
+        
+        Example: "Apurv" or "HOME_Apurv" → saves to:
           - HOME.csv (label='HOME')
           - HOME_Apurv/features_HOME_Apurv.csv (label='Apurv', class='HOME')
         
@@ -54,19 +56,20 @@ class StorageManager:
         # Extract filtered waveform if present (don't save to CSV)
         filtered_waveform = features.pop('_filtered_waveform', None)
         
-        # Determine class (HOME or INTRUDER)
-        is_home = person.upper().startswith('HOME') or (
-            not person.upper().startswith('INTRUDER')
-        )
-        main_class = 'HOME' if is_home else 'INTRUDER'
+        # ALWAYS treat as HOME - INTRUDER is detected by MLP, not stored
+        main_class = 'HOME'
         
-        # Extract individual name (e.g., "HOME_Apurv" → "Apurv")
+        # Normalize person label - extract name from any format
+        # "INTRUDER_Apurv" -> "Apurv", "HOME_Apurv" -> "Apurv", "Apurv" -> "Apurv"
         individual_name = person
         if '_' in person:
             individual_name = person.split('_', 1)[1]
         
-        # 1. Save to main aggregated CSV (HOME.csv or INTRUDER.csv)
-        main_csv_path = HOME_CSV_PATH if is_home else INTRUDER_CSV_PATH
+        # Final person label is always HOME_name format
+        normalized_person = f"HOME_{individual_name}" if individual_name and individual_name.upper() != 'HOME' else 'HOME'
+        
+        # 1. Save to main aggregated CSV (always HOME.csv)
+        main_csv_path = HOME_CSV_PATH
         try:
             features_with_meta = features.copy()
             features_with_meta['_label'] = main_class
@@ -85,11 +88,11 @@ class StorageManager:
         except Exception as e:
             print(f"[STORAGE] Error saving to main CSV: {e}")
         
-        # 2. Save to individual person CSV (backward compatible)
+        # 2. Save to individual person CSV
         try:
-            person_dir = os.path.join(DATASET_DIR, person)
+            person_dir = os.path.join(DATASET_DIR, normalized_person)
             os.makedirs(person_dir, exist_ok=True)
-            csv_path = os.path.join(person_dir, f"features_{person}.csv")
+            csv_path = os.path.join(person_dir, f"features_{normalized_person}.csv")
             
             features_individual = features.copy()
             features_individual['_label'] = individual_name
@@ -108,12 +111,12 @@ class StorageManager:
         except Exception as e:
             print(f"[STORAGE] Error saving individual CSV: {e}")
         
-        # 3. Save to SQLite
+        # 3. Save to SQLite (always with HOME_ prefix)
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
             c.execute("INSERT INTO samples (person, features_json, timestamp) VALUES (?, ?, ?)",
-                      (person, json.dumps(features), timestamp))
+                      (normalized_person, json.dumps(features), timestamp))
             conn.commit()
             conn.close()
             result["sqlite"] = True
@@ -298,6 +301,7 @@ class StorageManager:
         return {row[0]: row[1] for row in rows}
 
     def get_all_samples(self):
+        """Get all samples with data and labels"""
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT person, features_json FROM samples")
@@ -308,16 +312,89 @@ class StorageManager:
         labels = []
         for person, features_json in rows:
             features = json.loads(features_json)
-            # Convert dict values to list in consistent order
-            # We assume the order is consistent or we enforce it.
-            # Let's enforce the order based on a known list of keys from features.py logic
-            # But here we might just return the dict and let ML handle it.
-            # However, ML needs arrays.
-            # Let's rely on the keys being consistent from the extractor.
-            # Or better, extract values sorted by key or specific list.
-            
-            # We'll return dicts and let ML module handle conversion to array
             data.append(features)
             labels.append(person)
             
         return data, labels
+
+    def get_all_samples_with_details(self):
+        """
+        Get all samples with detailed dataset information.
+        Returns: (data, labels, dataset_details)
+        """
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        # Get samples
+        c.execute("SELECT person, features_json FROM samples")
+        rows = c.fetchall()
+        
+        # Get per-person counts
+        c.execute("SELECT person, COUNT(*) FROM samples GROUP BY person ORDER BY person")
+        person_counts = c.fetchall()
+        
+        conn.close()
+        
+        data = []
+        labels = []
+        for person, features_json in rows:
+            features = json.loads(features_json)
+            data.append(features)
+            labels.append(person)
+        
+        # Build detailed dataset info
+        dataset_details = {
+            "total_samples": len(data),
+            "datasets": [
+                {"name": person, "samples": count} 
+                for person, count in person_counts
+            ],
+            "dataset_names": [person for person, _ in person_counts]
+        }
+            
+        return data, labels, dataset_details
+
+    def get_samples_by_datasets(self, selected_datasets):
+        """
+        Get samples filtered by selected dataset names.
+        
+        Args:
+            selected_datasets: List of dataset names to include (e.g., ['HOME_Apurv', 'HOME_Samir'])
+        
+        Returns: (data, labels, dataset_details)
+        """
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        # Build SQL query with placeholders
+        placeholders = ','.join('?' * len(selected_datasets))
+        
+        # Get samples for selected datasets only
+        c.execute(f"SELECT person, features_json FROM samples WHERE person IN ({placeholders})", selected_datasets)
+        rows = c.fetchall()
+        
+        # Get per-person counts for selected datasets
+        c.execute(f"SELECT person, COUNT(*) FROM samples WHERE person IN ({placeholders}) GROUP BY person ORDER BY person", selected_datasets)
+        person_counts = c.fetchall()
+        
+        conn.close()
+        
+        data = []
+        labels = []
+        for person, features_json in rows:
+            features = json.loads(features_json)
+            data.append(features)
+            labels.append(person)
+        
+        # Build detailed dataset info
+        dataset_details = {
+            "total_samples": len(data),
+            "datasets": [
+                {"name": person, "samples": count} 
+                for person, count in person_counts
+            ],
+            "dataset_names": [person for person, _ in person_counts],
+            "selected_datasets": selected_datasets
+        }
+            
+        return data, labels, dataset_details

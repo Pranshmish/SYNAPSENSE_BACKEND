@@ -196,13 +196,21 @@ class MLPClassifierWrapper:
     def train(self, data: List[Dict[str, float]], labels: List[str], 
               target_samples: int = 150) -> Dict[str, Any]:
         """
-        Train MLP classifier on HOME data with synthetic INTRUDER generation.
+        Train MLP classifier on ALL stored HOME data with K-Fold Cross-Validation.
+        
+        Features:
+        - Uses ALL available data (not limited to target_samples)
+        - 5-Fold Stratified Cross-Validation for robust accuracy estimation
+        - Generates synthetic INTRUDER samples automatically
+        - Final model trained on ALL data after validation
         
         Args:
             data: List of feature dictionaries
             labels: List of labels (HOME, HOME_Apurv, etc.)
-            target_samples: Target total samples (default 150)
+            target_samples: Target total samples (for reference only)
         """
+        print(f"[MLP] Training on {len(data)} total samples with Cross-Validation")
+        
         # Convert to numpy
         X_full = self.prepare_features(data)
         X_full = np.nan_to_num(X_full, nan=0.0, posinf=0.0, neginf=0.0)
@@ -232,33 +240,260 @@ class MLPClassifierWrapper:
                 "error": f"Need at least 5 HOME samples, got {len(X_home)}"
             }
         
+        print(f"[MLP] Using {len(X_home)} HOME samples")
+        
         # Generate synthetic INTRUDER samples (equal to HOME samples)
         n_intruder = len(X_home)
         X_intruder = self.generate_synthetic_intruder(X_home, n_intruder)
         
         # Combine datasets
-        X_train = np.vstack([X_home, X_intruder])
+        X_combined = np.vstack([X_home, X_intruder])
         y_labels = ['HOME'] * len(X_home) + ['INTRUDER'] * len(X_intruder)
         
         # Encode labels
         self.encoder = LabelEncoder()
-        y_train = self.encoder.fit_transform(y_labels)
+        y_combined = self.encoder.fit_transform(y_labels)
         
         # Scale features
         self.scaler = StandardScaler()
-        X_scaled = self.scaler.fit_transform(X_train)
+        X_scaled = self.scaler.fit_transform(X_combined)
         
-        # Train model
+        # ============== K-FOLD CROSS-VALIDATION ==============
+        n_folds = min(5, len(X_home))  # Use 5 folds or less if not enough samples
+        print(f"[MLP] Running {n_folds}-Fold Cross-Validation...")
+        
+        cv_scores = []
+        fold_results = []
+        
         if PYTORCH_AVAILABLE:
-            result = self._train_pytorch(X_scaled, y_train)
+            cv_result = self._cross_validate_pytorch(X_scaled, y_combined, n_folds)
         else:
-            result = self._train_sklearn(X_scaled, y_train)
+            cv_result = self._cross_validate_sklearn(X_scaled, y_combined, n_folds)
+        
+        cv_scores = cv_result['cv_scores']
+        mean_cv_score = np.mean(cv_scores)
+        std_cv_score = np.std(cv_scores)
+        
+        print(f"[MLP] CV Scores: {[f'{s:.2f}%' for s in cv_scores]}")
+        print(f"[MLP] Mean CV Accuracy: {mean_cv_score:.2f}% (+/- {std_cv_score:.2f}%)")
+        
+        # ============== TRAIN FINAL MODEL ON ALL DATA ==============
+        print(f"[MLP] Training final model on ALL {len(X_scaled)} samples...")
+        
+        if PYTORCH_AVAILABLE:
+            result = self._train_pytorch_final(X_scaled, y_combined)
+        else:
+            result = self._train_sklearn_final(X_scaled, y_combined)
         
         if result.get("success", False):
             self.is_trained = True
+            
+            # Update metadata with CV results
+            self.metadata.update({
+                "cv_scores": cv_scores,
+                "cv_mean_accuracy": round(mean_cv_score, 2),
+                "cv_std": round(std_cv_score, 2),
+                "n_folds": n_folds,
+                "total_samples_used": len(X_scaled),
+                "home_samples": len(X_home),
+                "intruder_samples": len(X_intruder)
+            })
+            
+            # Add CV info to result
+            result["metrics"]["cv_accuracy"] = round(mean_cv_score, 2)
+            result["metrics"]["cv_std"] = round(std_cv_score, 2)
+            result["metrics"]["cv_scores"] = [round(s, 2) for s in cv_scores]
+            result["metrics"]["n_folds"] = n_folds
+            result["metrics"]["total_samples"] = len(X_scaled)
+            
             self.save_models()
         
         return result
+    
+    def _cross_validate_pytorch(self, X: np.ndarray, y: np.ndarray, n_folds: int) -> Dict:
+        """Perform K-Fold Cross-Validation with PyTorch"""
+        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+        cv_scores = []
+        
+        for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
+            X_train, X_val = X[train_idx], X[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
+            
+            # Create fresh model for this fold
+            input_size = X.shape[1]
+            fold_model = SimpleMLP(input_size=input_size, num_classes=2)
+            
+            # Train
+            criterion = nn.CrossEntropyLoss()
+            optimizer = optim.Adam(fold_model.parameters(), lr=0.001, weight_decay=0.01)
+            
+            X_train_t = torch.FloatTensor(X_train)
+            y_train_t = torch.LongTensor(y_train)
+            X_val_t = torch.FloatTensor(X_val)
+            
+            train_dataset = TensorDataset(X_train_t, y_train_t)
+            train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+            
+            # Quick training for CV (fewer epochs)
+            for epoch in range(50):
+                fold_model.train()
+                for batch_X, batch_y in train_loader:
+                    optimizer.zero_grad()
+                    outputs = fold_model(batch_X)
+                    loss = criterion(outputs, batch_y)
+                    loss.backward()
+                    optimizer.step()
+            
+            # Evaluate on validation fold
+            fold_model.eval()
+            with torch.no_grad():
+                val_pred = torch.argmax(fold_model(X_val_t), dim=1).numpy()
+                fold_acc = accuracy_score(y_val, val_pred) * 100
+                cv_scores.append(fold_acc)
+            
+            print(f"[MLP] Fold {fold+1}/{n_folds}: {fold_acc:.2f}%")
+        
+        return {"cv_scores": cv_scores}
+    
+    def _cross_validate_sklearn(self, X: np.ndarray, y: np.ndarray, n_folds: int) -> Dict:
+        """Perform K-Fold Cross-Validation with sklearn"""
+        from sklearn.model_selection import cross_val_score
+        
+        model = MLPClassifier(
+            hidden_layer_sizes=(128, 64, 32),
+            activation='relu',
+            solver='adam',
+            alpha=0.01,
+            max_iter=100,
+            random_state=42
+        )
+        
+        scores = cross_val_score(model, X, y, cv=n_folds, scoring='accuracy')
+        cv_scores = (scores * 100).tolist()
+        
+        return {"cv_scores": cv_scores}
+    
+    def _train_pytorch_final(self, X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
+        """Train final PyTorch model on ALL data"""
+        # Convert to tensors
+        X_t = torch.FloatTensor(X)
+        y_t = torch.LongTensor(y)
+        
+        # Create model
+        input_size = X.shape[1]
+        self.model = SimpleMLP(input_size=input_size, num_classes=2)
+        
+        # Loss and optimizer with L2 regularization
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(self.model.parameters(), lr=0.001, weight_decay=0.01)
+        
+        train_dataset = TensorDataset(X_t, y_t)
+        train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+        
+        # Train for more epochs on full data
+        best_loss = float('inf')
+        best_model_state = None
+        patience = 30
+        patience_counter = 0
+        
+        for epoch in range(300):
+            self.model.train()
+            epoch_loss = 0
+            for batch_X, batch_y in train_loader:
+                optimizer.zero_grad()
+                outputs = self.model(batch_X)
+                loss = criterion(outputs, batch_y)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+            
+            avg_loss = epoch_loss / len(train_loader)
+            
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                best_model_state = self.model.state_dict().copy()
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"[MLP] Early stopping at epoch {epoch}")
+                    break
+        
+        # Load best model
+        if best_model_state:
+            self.model.load_state_dict(best_model_state)
+        
+        # Final evaluation on training data
+        self.model.eval()
+        with torch.no_grad():
+            all_pred = torch.argmax(self.model(X_t), dim=1).numpy()
+            train_acc = accuracy_score(y, all_pred) * 100
+        
+        # Confusion matrix
+        cm = confusion_matrix(y, all_pred)
+        
+        self.metadata = {
+            "classes": list(self.encoder.classes_),
+            "training_accuracy": round(train_acc, 2),
+            "sample_count": len(X),
+            "feature_count": X.shape[1],
+            "model_type": "PyTorch MLP (Full Data + CV)",
+            "confusion_matrix": cm.tolist()
+        }
+        
+        print(f"[MLP] Final model accuracy on all data: {train_acc:.2f}%")
+        
+        return {
+            "success": True,
+            "metrics": {
+                "training_accuracy": round(train_acc, 2),
+                "classes": list(self.encoder.classes_),
+            },
+            "confusion_matrix": cm.tolist()
+        }
+    
+    def _train_sklearn_final(self, X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
+        """Train final sklearn model on ALL data"""
+        self.model = MLPClassifier(
+            hidden_layer_sizes=(128, 64, 32),
+            activation='relu',
+            solver='adam',
+            alpha=0.01,
+            batch_size=16,
+            learning_rate_init=0.001,
+            max_iter=300,
+            early_stopping=True,
+            validation_fraction=0.1,
+            n_iter_no_change=30,
+            random_state=42
+        )
+        
+        self.model.fit(X, y)
+        
+        # Evaluate
+        train_pred = self.model.predict(X)
+        train_acc = accuracy_score(y, train_pred) * 100
+        
+        # Confusion matrix
+        cm = confusion_matrix(y, train_pred)
+        
+        self.metadata = {
+            "classes": list(self.encoder.classes_),
+            "training_accuracy": round(train_acc, 2),
+            "sample_count": len(X),
+            "feature_count": X.shape[1],
+            "model_type": "sklearn MLP (Full Data + CV)",
+            "confusion_matrix": cm.tolist()
+        }
+        
+        return {
+            "success": True,
+            "metrics": {
+                "training_accuracy": round(train_acc, 2),
+                "classes": list(self.encoder.classes_),
+            },
+            "confusion_matrix": cm.tolist()
+        }
     
     def _train_pytorch(self, X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
         """Train using PyTorch with EarlyStopping"""

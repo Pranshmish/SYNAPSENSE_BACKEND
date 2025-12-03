@@ -90,3 +90,8 @@ class UploadResponse(BaseModel):
     imported_samples: int
     samples_per_person: Dict[str, int]
     message: str
+
+
+class TrainMLPRequest(BaseModel):
+    """Request for MLP training with optional dataset selection."""
+    selected_datasets: Optional[List[str]] = None  # List of dataset names to train on (None = all)

@@ -24,7 +24,7 @@ import zipfile
 import tempfile
 from io import BytesIO
 
-from models import TrainDataRequest, TrainResponse, PredictRequest, PredictResponse, StatusResponse
+from models import TrainDataRequest, TrainResponse, PredictRequest, PredictResponse, StatusResponse, TrainMLPRequest
 from features import FootstepFeatureExtractor, FEATURE_NAMES, extract_features
 from storage import StorageManager
 from ml import AnomalyDetector
@@ -269,7 +269,7 @@ async def predict_footsteps(request: PredictRequest):
 # ============== NEW MLP ENDPOINTS ==============
 
 @app.post("/train_mlp")
-async def train_mlp_model():
+async def train_mlp_model(request: TrainMLPRequest = None):
     """
     Train Simple MLP classifier on HOME data.
     
@@ -277,9 +277,22 @@ async def train_mlp_model():
     - Uses 20 robust features for best generalization
     - Generates synthetic INTRUDER samples automatically
     - Dropout + L2 regularization to prevent overfitting
-    - Target: 92% accuracy on 150 samples
+    - K-Fold Cross-Validation for robust accuracy estimation
+    - Optional: Train on selected datasets only
+    - Returns detailed dataset information
     """
-    all_features, all_labels = storage.get_all_samples()
+    # Parse request body (handle case where body is empty or None)
+    selected_datasets = None
+    if request and request.selected_datasets:
+        selected_datasets = request.selected_datasets
+        print(f"[TRAIN_MLP] Training on selected datasets: {selected_datasets}")
+    
+    # Get samples based on selection
+    if selected_datasets and len(selected_datasets) > 0:
+        all_features, all_labels, dataset_details = storage.get_samples_by_datasets(selected_datasets)
+    else:
+        all_features, all_labels, dataset_details = storage.get_all_samples_with_details()
+        print(f"[TRAIN_MLP] Training on ALL datasets: {dataset_details.get('dataset_names', [])}")
     
     if len(all_features) < 5:
         raise HTTPException(
@@ -294,6 +307,9 @@ async def train_mlp_model():
             status_code=400,
             detail=result.get("error", "MLP training failed")
         )
+    
+    # Add dataset details to result
+    result["dataset_details"] = dataset_details
     
     # Add dual dataset status
     dual_status = storage.get_dual_dataset_status()
