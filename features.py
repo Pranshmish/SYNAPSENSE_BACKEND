@@ -213,10 +213,10 @@ class FootstepFeatureExtractor:
         # 2. Apply Bandpass Filter (12-180 Hz)
         filtered = self.butterworth_filter(data, lowcut=12.0, highcut=180.0)
         
-        # 3. Apply Amplitude Gate (>= 60 ADC)
+        # 3. Apply Amplitude Gate (>= 50 ADC)
         # Check if peak amplitude exceeds gate
         peak_amplitude = np.max(np.abs(filtered))
-        if peak_amplitude < 60:
+        if peak_amplitude < 50:
             return filtered, False
             
         return filtered, True
