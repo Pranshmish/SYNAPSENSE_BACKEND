@@ -24,11 +24,16 @@ import zipfile
 import tempfile
 from io import BytesIO
 
-from models import TrainDataRequest, TrainResponse, PredictRequest, PredictResponse, StatusResponse, TrainMLPRequest
+from models import (
+    TrainDataRequest, TrainResponse, PredictRequest, PredictResponse, StatusResponse, 
+    TrainMLPRequest, TrainSelectedModelRequest, PredictSelectedModelRequest, 
+    SetActiveModelRequest, ModelStatusResponse
+)
 from features import FootstepFeatureExtractor, FEATURE_NAMES, extract_features
 from storage import StorageManager
 from ml import AnomalyDetector
 from mlp_model import mlp_classifier, MLPClassifierWrapper
+from model_manager import model_manager, MODEL_TYPES
 
 INTRUDER_CONF_THRESH = 0.85  # Updated: Higher threshold for MLP
 INTRUDER_MARGIN_THRESH = 0.15
@@ -407,6 +412,148 @@ def _get_recommended_action(dual_status: Dict, mlp_status: Dict) -> str:
         if accuracy < 90:
             return f"Model accuracy {accuracy}%. Collect more samples to improve."
         return f"Model ready! Accuracy: {accuracy}%"
+
+
+# ============== MULTI-MODEL ENDPOINTS ==============
+
+@app.get("/available_models")
+async def get_available_models():
+    """
+    Get list of all available models with their status.
+    Used for populating model selector dropdown.
+    """
+    return {
+        "models": model_manager.get_available_models(),
+        "active_model": model_manager.registry.get_active_model()
+    }
+
+
+@app.post("/train_selected_model")
+async def train_selected_model(request: TrainSelectedModelRequest):
+    """
+    Train a specific model type.
+    
+    Supports:
+    - RandomForestEnsemble: RF + Isolation Forest (~95% CV)
+    - MLPClassifier: Neural Network (~94% CV)
+    - HybridLSTMSNN: LSTM + SNN (Coming Soon)
+    """
+    model_name = request.model_name
+    
+    if model_name not in MODEL_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model: {model_name}. Available: {list(MODEL_TYPES.keys())}"
+        )
+    
+    if not MODEL_TYPES[model_name].get("ready", False):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{model_name} is not available yet. Coming soon!"
+        )
+    
+    # Get samples based on selection
+    if request.selected_datasets and len(request.selected_datasets) > 0:
+        all_features, all_labels, dataset_details = storage.get_samples_by_datasets(request.selected_datasets)
+    else:
+        all_features, all_labels, dataset_details = storage.get_all_samples_with_details()
+    
+    if len(all_features) < 5:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least 5 HOME samples, have {len(all_features)}"
+        )
+    
+    print(f"[TRAIN] Training {model_name} on {len(all_features)} samples...")
+    
+    result = model_manager.train_model(model_name, all_features, all_labels)
+    
+    if not result.get("success", False):
+        raise HTTPException(
+            status_code=400,
+            detail=result.get("error", "Training failed")
+        )
+    
+    # Add dataset details
+    result["dataset_details"] = dataset_details
+    result["dual_dataset"] = storage.get_dual_dataset_status()
+    
+    return result
+
+
+@app.post("/predict_selected_model")
+async def predict_with_selected_model(request: PredictSelectedModelRequest):
+    """
+    Predict using a specific model or the active model.
+    
+    If model_name is not provided, uses the currently active model.
+    """
+    # Extract features
+    features_dict = extractor.process_chunk(request.data)
+    
+    if not features_dict:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid signal - could not extract features."
+        )
+    
+    features_list = [features_dict.get(k, 0.0) for k in FEATURE_NAMES]
+    
+    # Determine which model to use
+    model_name = request.model_name or model_manager.registry.get_active_model()
+    
+    result = model_manager.predict_with_model(model_name, features_list)
+    
+    if not result.get("success", False):
+        raise HTTPException(
+            status_code=400,
+            detail=result.get("error", "Prediction failed")
+        )
+    
+    return PredictResponse(
+        prediction=result["prediction"],
+        confidence=result["confidence"],
+        is_intruder=result["is_intruder"],
+        alert=result["alert"],
+        probabilities=result["probabilities"],
+        anomaly_score=result.get("anomaly_score", 0.0),
+        threshold=INTRUDER_CONF_THRESH,
+        confidence_band=result["confidence_band"],
+        color_code=result["color_code"],
+        intruder_reason=result.get("rule_applied")
+    )
+
+
+@app.post("/set_active_model")
+async def set_active_model(request: SetActiveModelRequest):
+    """
+    Switch the active model for predictions.
+    
+    The model must be trained before it can be set as active.
+    """
+    result = model_manager.set_active_model(request.model_name)
+    
+    if not result.get("success", False):
+        raise HTTPException(
+            status_code=400,
+            detail=result.get("error", "Failed to set active model")
+        )
+    
+    return result
+
+
+@app.get("/model_status")
+async def get_model_status():
+    """
+    Get comprehensive status of all models.
+    
+    Returns status for RF, MLP, and Hybrid models with:
+    - Training status
+    - CV accuracy
+    - Samples used
+    - Whether it's currently active
+    """
+    return model_manager.get_all_models_status()
 
 
 @app.post("/reset_model")

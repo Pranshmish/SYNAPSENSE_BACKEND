@@ -95,3 +95,26 @@ class UploadResponse(BaseModel):
 class TrainMLPRequest(BaseModel):
     """Request for MLP training with optional dataset selection."""
     selected_datasets: Optional[List[str]] = None  # List of dataset names to train on (None = all)
+
+
+class TrainSelectedModelRequest(BaseModel):
+    """Request for training a specific model type."""
+    model_name: str  # "RandomForestEnsemble", "MLPClassifier", or "HybridLSTMSNN"
+    selected_datasets: Optional[List[str]] = None  # List of dataset names to train on (None = all)
+
+
+class PredictSelectedModelRequest(BaseModel):
+    """Request for prediction with a specific model."""
+    data: List[float]  # Raw ADC samples
+    model_name: Optional[str] = None  # If None, uses active model
+
+
+class SetActiveModelRequest(BaseModel):
+    """Request to set the active model for predictions."""
+    model_name: str  # Model to set as active
+
+
+class ModelStatusResponse(BaseModel):
+    """Response with model status and available models."""
+    models: Dict[str, Any]  # All models with their status
+    active_model: str  # Currently active model name

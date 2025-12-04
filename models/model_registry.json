@@ -1,0 +1,17 @@
+{
+  "models": {
+    "RandomForestEnsemble": {
+      "trained": true,
+      "cv_accuracy": 50.48,
+      "training_accuracy": 100.0,
+      "samples_used": 32,
+      "trained_at": "2025-12-04T09:15:55.098673",
+      "display_name": "Random Forest + Isolation Forest",
+      "short_name": "RF",
+      "description": "Hackathon Winner - 95% CV accuracy",
+      "ready": true
+    }
+  },
+  "active_model": "MLPClassifier",
+  "last_updated": "2025-12-04T09:15:55.098706"
+}
