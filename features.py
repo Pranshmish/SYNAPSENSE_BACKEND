@@ -18,6 +18,14 @@ from typing import List, Tuple, Optional, Dict, Any
 import warnings
 warnings.filterwarnings('ignore')
 
+# PyWavelets for wavelet features
+try:
+    import pywt
+    PYWT_AVAILABLE = True
+except ImportError:
+    PYWT_AVAILABLE = False
+    print("[FEATURES] PyWavelets not installed. Wavelet features disabled.")
+
 
 class LIF:
     """
@@ -213,10 +221,11 @@ class FootstepFeatureExtractor:
         # 2. Apply Bandpass Filter (12-180 Hz)
         filtered = self.butterworth_filter(data, lowcut=12.0, highcut=180.0)
         
-        # 3. Apply Amplitude Gate (>= 50 ADC)
+        # 3. Apply Amplitude Gate (>= 30 ADC) - lowered for better acceptance
         # Check if peak amplitude exceeds gate
         peak_amplitude = np.max(np.abs(filtered))
-        if peak_amplitude < 50:
+        if peak_amplitude < 30:
+            print(f"[FEATURES] Rejected by Amplitude Gate ({peak_amplitude:.2f} < 30 ADC)")
             return filtered, False
             
         return filtered, True
@@ -516,6 +525,102 @@ class FootstepFeatureExtractor:
         )
         
         return features
+    
+    def extract_wavelet_features(self, data: np.ndarray) -> Dict[str, float]:
+        """
+        Extract wavelet transform features using Discrete Wavelet Transform (DWT).
+        Uses Daubechies-4 wavelet with 5-level decomposition.
+        
+        Extracts:
+        - Energy at each decomposition level
+        - Wavelet entropy (distribution of energy across levels)
+        - Coefficient statistics (mean, std, max)
+        - Energy ratios between levels
+        """
+        features = {}
+        
+        if not PYWT_AVAILABLE:
+            # Return zeros if PyWavelets not available
+            for i in range(5):
+                features[f'wavelet_energy_d{i+1}'] = 0.0
+            features['wavelet_energy_a5'] = 0.0
+            features['wavelet_entropy'] = 0.0
+            features['wavelet_mean_coef'] = 0.0
+            features['wavelet_std_coef'] = 0.0
+            features['wavelet_max_coef'] = 0.0
+            features['wavelet_ratio_d1_a5'] = 0.0
+            features['wavelet_ratio_d2_d1'] = 0.0
+            return features
+        
+        try:
+            # Use Daubechies-4 wavelet for good time-frequency localization
+            wavelet = 'db4'
+            max_level = pywt.dwt_max_level(len(data), pywt.Wavelet(wavelet).dec_len)
+            decomp_level = min(5, max_level)  # Use 5 levels or max available
+            
+            # Perform multilevel DWT decomposition
+            coeffs = pywt.wavedec(data, wavelet, level=decomp_level)
+            
+            # coeffs = [cA_n, cD_n, cD_n-1, ..., cD_1]
+            # cA_n = approximation coefficients at level n
+            # cD_i = detail coefficients at level i
+            
+            # Calculate energy for each level
+            energies = []
+            all_coefs = []
+            
+            for i, coef in enumerate(coeffs):
+                energy = np.sum(coef ** 2)
+                energies.append(energy)
+                all_coefs.extend(coef)
+                
+                if i == 0:
+                    features['wavelet_energy_a5'] = float(energy)
+                else:
+                    level = decomp_level - i + 1
+                    features[f'wavelet_energy_d{level}'] = float(energy)
+            
+            # Fill in missing levels with zeros if decomp_level < 5
+            for level in range(1, 6):
+                if f'wavelet_energy_d{level}' not in features:
+                    features[f'wavelet_energy_d{level}'] = 0.0
+            if 'wavelet_energy_a5' not in features:
+                features['wavelet_energy_a5'] = 0.0
+            
+            # Wavelet entropy - measure of energy distribution across levels
+            total_energy = sum(energies) + 1e-10
+            probs = np.array(energies) / total_energy
+            probs = probs + 1e-10  # Avoid log(0)
+            features['wavelet_entropy'] = float(-np.sum(probs * np.log2(probs)))
+            
+            # Coefficient statistics
+            all_coefs = np.array(all_coefs)
+            features['wavelet_mean_coef'] = float(np.mean(np.abs(all_coefs)))
+            features['wavelet_std_coef'] = float(np.std(all_coefs))
+            features['wavelet_max_coef'] = float(np.max(np.abs(all_coefs)))
+            
+            # Energy ratios (useful for distinguishing signal characteristics)
+            d1_energy = features.get('wavelet_energy_d1', 0)
+            d2_energy = features.get('wavelet_energy_d2', 0)
+            a5_energy = features.get('wavelet_energy_a5', 1e-10)
+            
+            features['wavelet_ratio_d1_a5'] = float(d1_energy / (a5_energy + 1e-10))
+            features['wavelet_ratio_d2_d1'] = float(d2_energy / (d1_energy + 1e-10))
+            
+        except Exception as e:
+            print(f"[FEATURES] Wavelet extraction error: {e}")
+            # Return zeros on error
+            for i in range(5):
+                features[f'wavelet_energy_d{i+1}'] = 0.0
+            features['wavelet_energy_a5'] = 0.0
+            features['wavelet_entropy'] = 0.0
+            features['wavelet_mean_coef'] = 0.0
+            features['wavelet_std_coef'] = 0.0
+            features['wavelet_max_coef'] = 0.0
+            features['wavelet_ratio_d1_a5'] = 0.0
+            features['wavelet_ratio_d2_d1'] = 0.0
+        
+        return features
         
     def _skewness(self, data: np.ndarray) -> float:
         """Calculate skewness of distribution."""
@@ -577,14 +682,16 @@ class FootstepFeatureExtractor:
             features.update(self.extract_fft_features(normalized))
             features.update(self.extract_mfcc_features(normalized))
             features.update(self.extract_lif_features(normalized))
+            features.update(self.extract_wavelet_features(normalized))  # NEW: Wavelet features
             
             # Convert all numpy types to Python native types for JSON serialization
             features = {k: float(v) if hasattr(v, 'item') else float(v) for k, v in features.items()}
             
-            # Add the filtered waveform to the result so it can be saved
+            # Add the raw and filtered waveforms for saving
+            features['_raw_waveform'] = raw_data  # Save raw signal BEFORE any processing
             features['_filtered_waveform'] = filtered.tolist()
             
-            print(f"[FEATURES] ✓ Extracted {len(features)} features")
+            print(f"[FEATURES] ✓ Extracted {len(features)} features (including wavelet)")
             return features
         except Exception as e:
             print(f"[FEATURES] ✗ Feature extraction error: {e}")
@@ -645,7 +752,13 @@ FEATURE_NAMES = [
     'lif_high_spike_duration', 'lif_high_potential_mean', 'lif_high_potential_max', 'lif_high_potential_std',
     
     # Cross-neuron LIF features (2)
-    'lif_total_spikes', 'lif_low_high_ratio'
+    'lif_total_spikes', 'lif_low_high_ratio',
+    
+    # Wavelet features (12) - NEW
+    'wavelet_energy_d1', 'wavelet_energy_d2', 'wavelet_energy_d3', 
+    'wavelet_energy_d4', 'wavelet_energy_d5', 'wavelet_energy_a5',
+    'wavelet_entropy', 'wavelet_mean_coef', 'wavelet_std_coef',
+    'wavelet_max_coef', 'wavelet_ratio_d1_a5', 'wavelet_ratio_d2_d1'
 ]
 
 

@@ -9,9 +9,9 @@ from typing import List, Dict, Optional, Any, Literal
 
 
 class TrainDataRequest(BaseModel):
-    """Request for submitting training data."""
-    data: List[Dict[str, List[float]]]  # [{"raw_time_series": [...200 samples...]}, ...]
-    label: str  # "HOME" for training (INTRUDER optional for binary fallback)
+    """Request for submitting training data with optional analysis data."""
+    data: List[Dict[str, Any]]  # [{raw_time_series: [...], fft_data?: {...}, lif_data?: {...}, filtered_waveform?: [...]}]
+    label: str  # "HOME" or "INTRUDER" prefix
     train_model: bool = False  # Whether to trigger training after saving
 
 

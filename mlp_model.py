@@ -840,11 +840,16 @@ class MLPClassifierWrapper:
         if not self.is_trained:
             return {"trained": False, "message": "MLP not trained"}
         
+        # Prefer cv_mean_accuracy over training_accuracy
+        accuracy = self.metadata.get("cv_mean_accuracy", self.metadata.get("training_accuracy", 0))
+        
         return {
             "trained": True,
             "model_type": self.metadata.get("model_type", "Unknown"),
             "classes": self.metadata.get("classes", []),
-            "accuracy": self.metadata.get("training_accuracy", 0),
+            "accuracy": accuracy,
+            "cv_accuracy": self.metadata.get("cv_mean_accuracy", accuracy),
+            "cv_std": self.metadata.get("cv_std", 0),
             "sample_count": self.metadata.get("sample_count", 0),
             "home_samples": self.metadata.get("home_samples", 0),
             "intruder_samples": self.metadata.get("intruder_samples", 0),

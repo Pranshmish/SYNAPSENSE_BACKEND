@@ -6,3 +6,6 @@ numpy
 scipy
 joblib
 pydantic
+PyWavelets>=1.4.0
+matplotlib>=3.7.0
+python-multipart
