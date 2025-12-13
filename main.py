@@ -39,6 +39,7 @@ from model_manager import (
     predict_with_model, set_active_model as set_active_model_func,
     ModelRegistry
 )
+from tracking_router import router as tracking_router
 
 # Model types for backward compatibility
 MODEL_TYPES = {
@@ -51,6 +52,7 @@ INTRUDER_CONF_THRESH = 0.85  # Updated: Higher threshold for MLP
 INTRUDER_MARGIN_THRESH = 0.15
 
 app = FastAPI(title="SynapSense - HOME/INTRUDER Footstep Classifier")
+app.include_router(tracking_router)
 
 # CORS
 app.add_middleware(
