@@ -118,3 +118,18 @@ class ModelStatusResponse(BaseModel):
     """Response with model status and available models."""
     models: Dict[str, Any]  # All models with their status
     active_model: str  # Currently active model name
+
+
+class MultiChannelTrainItem(BaseModel):
+    """Single channel data item for multi-channel saving."""
+    raw_time_series: List[float]
+    channel: int
+    fft_data: Optional[Dict[str, Any]] = None
+    lif_data: Optional[Dict[str, Any]] = None
+    filtered_waveform: Optional[List[float]] = None
+
+class MultiChannelTrainRequest(BaseModel):
+    """Request for submitting synchronized 4-channel footstep data."""
+    items: List[MultiChannelTrainItem]
+    label: str
+    train_model: bool = False

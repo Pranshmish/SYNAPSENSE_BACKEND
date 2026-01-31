@@ -25,9 +25,10 @@ import tempfile
 from io import BytesIO
 
 from models import (
-    TrainDataRequest, TrainResponse, PredictRequest, PredictResponse, StatusResponse, 
-    TrainMLPRequest, TrainSelectedModelRequest, PredictSelectedModelRequest, 
-    SetActiveModelRequest, ModelStatusResponse
+    TrainDataRequest, TrainResponse, PredictRequest, PredictResponse,
+    StatusResponse, DatasetStatusResponse, TrainMLPRequest,
+    TrainSelectedModelRequest, PredictSelectedModelRequest,
+    SetActiveModelRequest, ModelStatusResponse, MultiChannelTrainRequest
 )
 from features import FootstepFeatureExtractor, FEATURE_NAMES, extract_features
 from storage import StorageManager
@@ -163,16 +164,34 @@ async def train_data(request: TrainDataRequest):
                 if lif_data:
                     features['_lif_data'] = lif_data
                 
+                # Add channel info if present
+                channel = item.get("channel") or item.get("_channel")
+                if channel is not None:
+                    features['_channel'] = channel
+                
                 # DUAL SAVE: Save to both main CSV and individual file with analysis plots
                 save_result = storage.save_sample_dual(label, features, save_as_intruder=save_as_intruder)
-                extracted_features_list.append(list(features.values()))
+                
+                # Sanitize features for response (remove underscores and non-numbers) helps avoid 500 errors
+                clean_values = [
+                    v for k, v in features.items() 
+                    if not k.startswith('_') and isinstance(v, (int, float))
+                ]
+                extracted_features_list.append(clean_values)
+                
                 valid_samples += 1
                 print(f"[TRAIN] ✓ Saved sample #{valid_samples} for {label} (dual: {save_result}, intruder: {save_as_intruder})")
             else:
                 rejected_chunks += 1
                 import numpy as np
-                data = np.array(raw_chunk)
-                print(f"[TRAIN] ✗ Feature extraction failed: len={len(raw_chunk)}, std={np.std(data):.6f}, mean={np.mean(data):.2f}")
+                # Sanitize data for logging statistics
+                try:
+                    clean_data = [x if x is not None else 0 for x in raw_chunk]
+                    data = np.array(clean_data, dtype=np.float64)
+                    stats = f"std={np.std(data):.6f}, mean={np.mean(data):.2f}"
+                except Exception:
+                    stats = "stats_error"
+                print(f"[TRAIN] ✗ Feature extraction failed: len={len(raw_chunk)}, {stats}")
         
         print(f"[TRAIN] Result: {valid_samples} saved, {rejected_chunks} rejected for label={label}")
         
@@ -218,9 +237,85 @@ async def train_data(request: TrainDataRequest):
         )
     except Exception as e:
         import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
         print(f"[TRAIN] ERROR: {e}")
+        # traceback.print_exc()
+        # Log to file for debugging
+        try:
+            with open("error_log.txt", "w") as f:
+                f.write(error_msg)
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/train_multichannel", response_model=TrainResponse)
+async def train_multichannel(request: MultiChannelTrainRequest):
+    """
+    Process synchronized 4-channel data and save as a SINGLE unified row.
+    """
+    try:
+        label = request.label
+        save_as_intruder = label.upper().startswith('INTRUDER')
+        print(f"[TRAIN-MULTI] Processing multi-channel event for label='{label}' with {len(request.items)} items")
+        
+        channel_data_for_storage = []
+        rejected_count = 0
+        
+        # 1. Process each channel item
+        for item in request.items:
+            raw_chunk = item.raw_time_series
+            if not raw_chunk or len(raw_chunk) < 20:
+                print(f"[TRAIN-MULTI]   Filtered out item: len={len(raw_chunk) if raw_chunk else 0}")
+                continue
+                
+            # Extract features for this channel
+            features = extractor.process_chunk(raw_chunk)
+            if features:
+                print(f"[TRAIN-MULTI]   ✓ Channel {item.channel} OK")
+                # Prepare data package for combined storage
+                ch_package = {
+                    'channel': item.channel,
+                    'features': features,
+                    'raw_waveform': raw_chunk,
+                    'filtered_waveform': item.filtered_waveform,
+                    'fft_data': item.fft_data,
+                    'lif_data': item.lif_data
+                }
+                channel_data_for_storage.append(ch_package)
+            else:
+                print(f"[TRAIN-MULTI]   ✗ Channel {item.channel} REJECTED by feature extractor")
+                rejected_count += 1
+        
+        if not channel_data_for_storage:
+            print(f"[TRAIN-MULTI] ✗ REJECTED: No valid channels found in {len(request.items)} items")
+            return TrainResponse(success=False, samples_per_person=storage.get_sample_counts(), valid_samples=0)
+
+        print(f"[TRAIN-MULTI] ✓ SAVING {len(channel_data_for_storage)} valid channels")
+        save_result = storage.save_multichannel_event(label, channel_data_for_storage, save_as_intruder=save_as_intruder)
+        
+        # Update counts and status
+        counts = storage.get_sample_counts()
+        dual_status = storage.get_dual_dataset_status()
+        
+        return TrainResponse(
+            success=True,
+            samples_per_person=counts,
+            valid_samples=1, # One combined sample
+            label_used=label,
+            metrics={
+                "dual_dataset": {
+                    "home_samples": dual_status["home_csv"]["samples"],
+                    "progress_percent": dual_status["progress_percent"],
+                    "target": dual_status["target_samples"]
+                },
+                "storage_result": save_result
+            }
+        )
+    except Exception as e:
+        print(f"[TRAIN-MULTI] ERROR: {e}")
+        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.post("/predictfootsteps", response_model=PredictResponse)

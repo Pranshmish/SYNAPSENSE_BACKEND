@@ -210,7 +210,7 @@ class FootstepFeatureExtractor:
         Apply exact processing chain used by frontend graph:
         1. Spike Multiplier (0.8x)
         2. Bandpass Filter (12-180 Hz)
-        3. Amplitude Gate (>= 60 ADC)
+        3. Amplitude Gate (>= 10 ADC)
         
         Returns:
             Tuple[filtered_data, is_valid]
@@ -221,11 +221,10 @@ class FootstepFeatureExtractor:
         # 2. Apply Bandpass Filter (12-180 Hz)
         filtered = self.butterworth_filter(data, lowcut=12.0, highcut=180.0)
         
-        # 3. Apply Amplitude Gate (>= 30 ADC) - lowered for better acceptance
+        # 3. Apply Amplitude Gate (>= 5 ADC) - lowered for multi-channel secondary sensors
         # Check if peak amplitude exceeds gate
         peak_amplitude = np.max(np.abs(filtered))
-        if peak_amplitude < 30:
-            print(f"[FEATURES] Rejected by Amplitude Gate ({peak_amplitude:.2f} < 30 ADC)")
+        if peak_amplitude < 5:
             return filtered, False
             
         return filtered, True
@@ -622,6 +621,27 @@ class FootstepFeatureExtractor:
         
         return features
         
+
+    def extract_four_phase_features(self, data: np.ndarray) -> Dict[str, float]:
+        """
+        Extract features based on Four Phase Segmentation logic (Pipeline 2.0).
+        Includes: Heel_to_Toe_Delay_MS, Impact_Sharpness_Ratio, Damping_Coefficient, 
+        Cadence_InterStep_Variance, Spectral_Centroid_Drift.
+        
+        Currently placeholders to be implemented with full segmentation logic.
+        """
+        features = {}
+        
+        # Placeholder values - Feature extraction logic needs to be fully implemented 
+        # based on segment definitions in pipeline_config.json
+        features['Heel_to_Toe_Delay_MS'] = 0.0
+        features['Impact_Sharpness_Ratio'] = 0.0
+        features['Damping_Coefficient'] = 0.0
+        features['Cadence_InterStep_Variance'] = 0.0
+        features['Spectral_Centroid_Drift'] = 0.0
+        
+        return features
+
     def _skewness(self, data: np.ndarray) -> float:
         """Calculate skewness of distribution."""
         n = len(data)
@@ -655,34 +675,37 @@ class FootstepFeatureExtractor:
         3. Apply Amplitude Gate (>= 60 ADC)
         4. Extract features from FILTERED waveform
         """
-        # Convert to numpy array
-        data = np.array(raw_data, dtype=np.float64)
-        
-        # Apply frontend-matched processing
-        filtered, is_valid = self.apply_frontend_processing(data)
-        
-        if not is_valid:
-            print(f"[FEATURES] Rejected by Amplitude Gate (< 60 ADC): peak={np.max(np.abs(filtered)):.2f}")
-            return None
-            
-        # Validate chunk length
-        if len(filtered) < 20:
-            return None
-        
-        print(f"[FEATURES] Validation OK: len={len(filtered)}, peak={np.max(np.abs(filtered)):.2f}")
-        
-        # Apply adaptive gain normalization (helps with low/medium vibration)
-        # Note: We use the filtered data for this
-        normalized = self.adaptive_gain_normalize(filtered)
-        
-        # Extract all feature sets
         try:
+            # Convert to numpy array
+            data = np.array(raw_data, dtype=np.float64)
+            
+            # Apply frontend-matched processing
+            filtered, is_valid = self.apply_frontend_processing(data)
+            
+            if not is_valid:
+                # Log the peak to help debug rejections
+                peak = np.max(np.abs(filtered)) if len(filtered) > 0 else 0
+                print(f"[FEATURES] Rejected by Amplitude Gate (< 5 ADC): peak={peak:.2f}")
+                return None
+                
+            # Validate chunk length
+            if len(filtered) < 20:
+                return None
+            
+            print(f"[FEATURES] Validation OK: len={len(filtered)}, peak={np.max(np.abs(filtered)):.2f}")
+            
+            # Apply adaptive gain normalization (helps with low/medium vibration)
+            # Note: We use the filtered data for this
+            normalized = self.adaptive_gain_normalize(filtered)
+            
+            # Extract all feature sets
             features = {}
             features.update(self.extract_statistical_features(normalized))
             features.update(self.extract_fft_features(normalized))
             features.update(self.extract_mfcc_features(normalized))
             features.update(self.extract_lif_features(normalized))
             features.update(self.extract_wavelet_features(normalized))  # NEW: Wavelet features
+            features.update(self.extract_four_phase_features(normalized)) # NEW: Four Phase features
             
             # Convert all numpy types to Python native types for JSON serialization
             features = {k: float(v) if hasattr(v, 'item') else float(v) for k, v in features.items()}
@@ -695,6 +718,8 @@ class FootstepFeatureExtractor:
             return features
         except Exception as e:
             print(f"[FEATURES] ✗ Feature extraction error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
         
     def extract_features_batch(self, samples_list: List[List[float]]) -> List[Dict[str, float]]:
@@ -758,7 +783,11 @@ FEATURE_NAMES = [
     'wavelet_energy_d1', 'wavelet_energy_d2', 'wavelet_energy_d3', 
     'wavelet_energy_d4', 'wavelet_energy_d5', 'wavelet_energy_a5',
     'wavelet_entropy', 'wavelet_mean_coef', 'wavelet_std_coef',
-    'wavelet_max_coef', 'wavelet_ratio_d1_a5', 'wavelet_ratio_d2_d1'
+    'wavelet_max_coef', 'wavelet_ratio_d1_a5', 'wavelet_ratio_d2_d1',
+    
+    # New Pipeline 2.0 Features
+    'Heel_to_Toe_Delay_MS', 'Impact_Sharpness_Ratio', 'Damping_Coefficient',
+    'Cadence_InterStep_Variance', 'Spectral_Centroid_Drift'
 ]
 
 

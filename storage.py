@@ -13,6 +13,8 @@ DATASET_DIR = os.path.join(_SCRIPT_DIR, "dataset")
 # Main aggregated files for HOME/INTRUDER classification
 HOME_CSV_PATH = os.path.join(DATASET_DIR, "HOME.csv")
 INTRUDER_CSV_PATH = os.path.join(DATASET_DIR, "INTRUDER.csv")
+# NEW: Synchronized 4-channel dataset
+MULTI_CHANNEL_DATASET_PATH = os.path.join(DATASET_DIR, "multichannel_footsteps_dataset.csv")
 
 class StorageManager:
     def __init__(self):
@@ -59,114 +61,151 @@ class StorageManager:
         
         Returns dict with save status for each file.
         """
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        timestamp_safe = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        result = {"main_csv": False, "individual_csv": False, "sqlite": False, "analysis_plots": False}
-        
-        # Extract waveforms and analysis data if present (don't save to feature CSV)
-        filtered_waveform = features.pop('_filtered_waveform', None)
-        raw_waveform = features.pop('_raw_waveform', None)
-        fft_data = features.pop('_fft_data', None)
-        lif_data = features.pop('_lif_data', None)
-        
-        # Determine main class based on save_as_intruder flag
-        main_class = 'INTRUDER' if save_as_intruder else 'HOME'
-        
-        # Normalize person label - extract name from any format
-        # "INTRUDER_Apurv" -> "Apurv", "HOME_Apurv" -> "Apurv", "Apurv" -> "Apurv"
-        individual_name = person
-        if '_' in person:
-            individual_name = person.split('_', 1)[1]
-        
-        # Final person label with appropriate prefix
-        if individual_name and individual_name.upper() not in ['HOME', 'INTRUDER']:
-            normalized_person = f"{main_class}_{individual_name}"
-        else:
-            normalized_person = main_class
-        
-        # 1. Save to main aggregated CSV (HOME.csv or INTRUDER.csv)
-        main_csv_path = INTRUDER_CSV_PATH if save_as_intruder else HOME_CSV_PATH
         try:
-            features_with_meta = features.copy()
-            features_with_meta['_label'] = main_class
-            features_with_meta['_person'] = individual_name
-            features_with_meta['_timestamp'] = timestamp
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp_safe = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            result = {"main_csv": False, "individual_csv": False, "sqlite": False, "analysis_plots": False}
             
-            file_exists = os.path.exists(main_csv_path)
-            fieldnames = list(features_with_meta.keys())
+            # Extract waveforms and analysis data if present (don't save to feature CSV)
+            filtered_waveform = features.pop('_filtered_waveform', None)
+            raw_waveform = features.pop('_raw_waveform', None)
+            fft_data = features.pop('_fft_data', None)
+            lif_data = features.pop('_lif_data', None)
+            channel = features.pop('_channel', None)
+            channel_suffix = f"_ch{channel}" if channel is not None else ""
             
-            with open(main_csv_path, 'a', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerow(features_with_meta)
-            result["main_csv"] = True
-        except Exception as e:
-            print(f"[STORAGE] Error saving to main CSV: {e}")
-        
-        # 2. Save to individual person CSV
-        try:
-            person_dir = os.path.join(DATASET_DIR, normalized_person)
-            os.makedirs(person_dir, exist_ok=True)
-            csv_path = os.path.join(person_dir, f"features_{normalized_person}.csv")
+            # Determine main class based on save_as_intruder flag
+            main_class = 'INTRUDER' if save_as_intruder else 'HOME'
             
-            features_individual = features.copy()
-            features_individual['_label'] = individual_name
-            features_individual['_class'] = main_class
-            features_individual['_timestamp'] = timestamp
+            # Normalize person label - extract name from any format
+            # "INTRUDER_Apurv" -> "Apurv", "HOME_Apurv" -> "Apurv", "Apurv" -> "Apurv"
+            individual_name = person
+            if '_' in person and len(person.split('_', 1)) > 1:
+                individual_name = person.split('_', 1)[1]
             
-            file_exists = os.path.exists(csv_path)
-            fieldnames = list(features_individual.keys())
+            # Final person label with appropriate prefix
+            if individual_name and individual_name.upper() not in ['HOME', 'INTRUDER']:
+                normalized_person = f"{main_class}_{individual_name}"
+            else:
+                normalized_person = main_class
             
-            with open(csv_path, 'a', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerow(features_individual)
-            result["individual_csv"] = True
-        except Exception as e:
-            print(f"[STORAGE] Error saving individual CSV: {e}")
-        
-        # 3. Save to SQLite
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("INSERT INTO samples (person, features_json, timestamp) VALUES (?, ?, ?)",
-                      (normalized_person, json.dumps(features), timestamp))
-            conn.commit()
-            conn.close()
-            result["sqlite"] = True
-        except Exception as e:
-            print(f"[STORAGE] Error saving to SQLite: {e}")
-        
-        # 4. Save waveforms and analysis data
-        person_dir = os.path.join(DATASET_DIR, normalized_person)
-        
-        # Save raw signal (before any processing)
-        if raw_waveform:
-            self._save_raw_signal(person_dir, raw_waveform, timestamp_safe, normalized_person)
-        
-        # Save filtered waveform with plot
-        if filtered_waveform:
-            self._save_waveform(normalized_person, filtered_waveform, timestamp)
-        
-        # 5. Save comprehensive analysis plots (FFT, LIF, Combined)
-        if raw_waveform or filtered_waveform or fft_data or lif_data:
+            # 1. Save to main aggregated CSV (HOME.csv or INTRUDER.csv)
+            main_csv_path = INTRUDER_CSV_PATH if save_as_intruder else HOME_CSV_PATH
             try:
-                self._save_analysis_plots(
-                    person_dir=person_dir,
-                    timestamp_safe=timestamp_safe,
-                    person=normalized_person,
-                    raw_waveform=raw_waveform,
-                    filtered_waveform=filtered_waveform,
-                    fft_data=fft_data,
-                    lif_data=lif_data
-                )
-                result["analysis_plots"] = True
+                features_with_meta = features.copy()
+                features_with_meta['_label'] = main_class
+                features_with_meta['_person'] = individual_name
+                features_with_meta['_timestamp'] = timestamp
+                if channel is not None:
+                    features_with_meta['_channel'] = channel
+                
+                file_exists = os.path.exists(main_csv_path)
+                
+                # Get existing header if file exists to avoid column mismatch
+                if file_exists:
+                    with open(main_csv_path, 'r', newline='') as f:
+                        reader = csv.reader(f)
+                        fieldnames = next(reader)
+                    # Filter features to only include existing fields
+                    features_to_save = {k: v for k, v in features_with_meta.items() if k in fieldnames}
+                else:
+                    fieldnames = list(features_with_meta.keys())
+                    features_to_save = features_with_meta
+
+                with open(main_csv_path, 'a', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+                    if not file_exists:
+                        writer.writeheader()
+                    writer.writerow(features_to_save)
+                result["main_csv"] = True
             except Exception as e:
-                print(f"[STORAGE] Error in analysis plots: {e}")
-        
-        return result
+                print(f"[STORAGE] Error saving to main CSV: {e}")
+            
+            # 2. Save to individual person CSV
+            try:
+                person_dir = os.path.join(DATASET_DIR, normalized_person)
+                os.makedirs(person_dir, exist_ok=True)
+                csv_path = os.path.join(person_dir, f"features_{normalized_person}{channel_suffix}.csv")
+                
+                features_individual = features.copy()
+                features_individual['_label'] = individual_name
+                features_individual['_class'] = main_class
+                features_individual['_timestamp'] = timestamp
+                if channel is not None:
+                    features_individual['_channel'] = channel
+                
+                file_exists = os.path.exists(csv_path)
+                
+                if file_exists:
+                    with open(csv_path, 'r', newline='') as f:
+                        reader = csv.reader(f)
+                        fieldnames = next(reader)
+                    features_to_save = {k: v for k, v in features_individual.items() if k in fieldnames}
+                else:
+                    fieldnames = list(features_individual.keys())
+                    features_to_save = features_individual
+
+                with open(csv_path, 'a', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+                    if not file_exists:
+                        writer.writeheader()
+                    writer.writerow(features_to_save)
+                result["individual_csv"] = True
+            except Exception as e:
+                print(f"[STORAGE] Error saving individual CSV: {e}")
+            
+            # 3. Save to SQLite
+            try:
+                # Include channel in normalized features for consistency
+                features_sqlite = features.copy()
+                if channel is not None:
+                    features_sqlite['_channel'] = channel
+                
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("INSERT INTO samples (person, features_json, timestamp) VALUES (?, ?, ?)",
+                          (normalized_person, json.dumps(features_sqlite), timestamp))
+                conn.commit()
+                conn.close()
+                result["sqlite"] = True
+            except Exception as e:
+                print(f"[STORAGE] Error saving to SQLite: {e}")
+            
+            # 4. Save waveforms and analysis data
+            person_dir = os.path.join(DATASET_DIR, normalized_person)
+            
+            # Save raw signal (before any processing)
+            if raw_waveform:
+                self._save_raw_signal(person_dir, raw_waveform, timestamp_safe, normalized_person, channel=channel)
+            
+            # Save filtered waveform with plot
+            if filtered_waveform:
+                self._save_waveform(normalized_person, filtered_waveform, timestamp, channel=channel)
+            
+            # 5. Save comprehensive analysis plots (FFT, LIF, Combined)
+            if raw_waveform or filtered_waveform or fft_data or lif_data:
+                try:
+                    self._save_analysis_plots(
+                        person_dir=person_dir,
+                        timestamp_safe=timestamp_safe,
+                        person=normalized_person,
+                        raw_waveform=raw_waveform,
+                        filtered_waveform=filtered_waveform,
+                        fft_data=fft_data,
+                        lif_data=lif_data,
+                        channel=channel
+                    )
+                    result["analysis_plots"] = True
+                except Exception as e:
+                    print(f"[STORAGE] Error in analysis plots: {e}")
+            
+            return result
+            
+        except Exception as e:
+            print(f"[STORAGE] CRITICAL ERROR in save_sample_dual: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"error": str(e), "main_csv": False}
 
     def save_sample(self, person: str, features: Dict[str, Any]):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -235,16 +274,22 @@ class StorageManager:
             except Exception as e:
                 print(f"[STORAGE] Error saving waveform PNG: {e}")
 
-    def _save_waveform(self, person: str, filtered_waveform: List, timestamp: str):
+    def _save_waveform(self, person: str, filtered_waveform: List, timestamp: str, channel: int = None):
         """Helper to save waveform data"""
         timestamp_safe = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        channel_suffix = f"_ch{channel}" if channel is not None else ""
         person_dir = os.path.join(DATASET_DIR, person)
-        os.makedirs(person_dir, exist_ok=True)
+        try:
+            os.makedirs(person_dir, exist_ok=True)
+        except Exception as e:
+            print(f"[STORAGE] Error creating directory {person_dir}: {e}")
+            return
+
         
         # Save Waveform CSV
         wave_dir = os.path.join(person_dir, "waveforms")
         os.makedirs(wave_dir, exist_ok=True)
-        wave_csv_path = os.path.join(wave_dir, f"wave_{timestamp_safe}.csv")
+        wave_csv_path = os.path.join(wave_dir, f"wave{channel_suffix}_{timestamp_safe}.csv")
         
         try:
             import pandas as pd
@@ -256,7 +301,7 @@ class StorageManager:
         # Save Waveform PNG
         plot_dir = os.path.join(person_dir, "plots")
         os.makedirs(plot_dir, exist_ok=True)
-        plot_path = os.path.join(plot_dir, f"plot_{timestamp_safe}.png")
+        plot_path = os.path.join(plot_dir, f"plot{channel_suffix}_{timestamp_safe}.png")
         
         try:
             import matplotlib
@@ -265,7 +310,7 @@ class StorageManager:
             
             plt.figure(figsize=(10, 4))
             plt.plot(filtered_waveform, color='green', linewidth=1.5)
-            plt.title(f"Filtered Footstep Event - {person} ({timestamp})")
+            plt.title(f"Filtered Footstep Event - {person} (Channel {channel if channel is not None else 0}) ({timestamp})")
             plt.xlabel("Sample")
             plt.ylabel("Amplitude (Filtered)")
             plt.grid(True, alpha=0.3)
@@ -275,12 +320,13 @@ class StorageManager:
         except Exception as e:
             print(f"[STORAGE] Error saving waveform PNG: {e}")
 
-    def _save_raw_signal(self, person_dir: str, raw_waveform: List, timestamp_safe: str, person: str):
+    def _save_raw_signal(self, person_dir: str, raw_waveform: List, timestamp_safe: str, person: str, channel: int = None):
         """Save raw signal (before any filtering/processing) to a separate directory."""
         try:
+            channel_suffix = f"_ch{channel}" if channel is not None else ""
             raw_dir = os.path.join(person_dir, "raw_signals")
             os.makedirs(raw_dir, exist_ok=True)
-            raw_csv_path = os.path.join(raw_dir, f"raw_{timestamp_safe}.csv")
+            raw_csv_path = os.path.join(raw_dir, f"raw{channel_suffix}_{timestamp_safe}.csv")
             
             import pandas as pd
             df_raw = pd.DataFrame({'raw_adc': raw_waveform})
@@ -291,7 +337,8 @@ class StorageManager:
 
     def _save_analysis_plots(self, person_dir: str, timestamp_safe: str, person: str, 
                              raw_waveform: List = None, filtered_waveform: List = None,
-                             fft_data: Dict = None, lif_data: Dict = None, mfcc_data: Dict = None):
+                             fft_data: Dict = None, lif_data: Dict = None, mfcc_data: Dict = None,
+                             channel: int = None):
         """
         Save comprehensive analysis plots for each footstep event:
         - Raw Waveform
@@ -304,6 +351,7 @@ class StorageManager:
         Also saves the data as CSVs for later visualization.
         """
         try:
+            channel_suffix = f"_ch{channel}" if channel is not None else ""
             import matplotlib
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
@@ -325,7 +373,7 @@ class StorageManager:
                     'frequency': fft_data['frequencies'],
                     'magnitude': fft_data['magnitudes']
                 })
-                fft_csv_path = os.path.join(analysis_dir, f"fft_{timestamp_safe}.csv")
+                fft_csv_path = os.path.join(analysis_dir, f"fft{channel_suffix}_{timestamp_safe}.csv")
                 fft_df.to_csv(fft_csv_path, index=False)
                 
                 # Save FFT Plot
@@ -337,7 +385,7 @@ class StorageManager:
                 plt.ylabel("Magnitude")
                 plt.grid(True, alpha=0.3)
                 plt.tight_layout()
-                plt.savefig(os.path.join(plots_dir, f"fft_{timestamp_safe}.png"), dpi=100)
+                plt.savefig(os.path.join(plots_dir, f"fft{channel_suffix}_{timestamp_safe}.png"), dpi=100)
                 plt.close()
                 print(f"[STORAGE] ✓ Saved FFT: {fft_csv_path}")
             
@@ -398,7 +446,7 @@ class StorageManager:
                     import pandas as pd
                     mfcc_df = pd.DataFrame(computed_mfcc, 
                                           index=[f"MFCC_{i}" for i in range(computed_mfcc.shape[0])])
-                    mfcc_csv_path = os.path.join(analysis_dir, f"mfcc_{timestamp_safe}.csv")
+                    mfcc_csv_path = os.path.join(analysis_dir, f"mfcc{channel_suffix}_{timestamp_safe}.csv")
                     mfcc_df.to_csv(mfcc_csv_path)
                     
                     # Save MFCC Plot (heatmap)
@@ -409,7 +457,7 @@ class StorageManager:
                     plt.xlabel("Time Frame")
                     plt.ylabel("MFCC Coefficient")
                     plt.tight_layout()
-                    plt.savefig(os.path.join(plots_dir, f"mfcc_{timestamp_safe}.png"), dpi=100)
+                    plt.savefig(os.path.join(plots_dir, f"mfcc{channel_suffix}_{timestamp_safe}.png"), dpi=100)
                     plt.close()
                     print(f"[STORAGE] ✓ Saved MFCC: {mfcc_csv_path}")
             
@@ -422,7 +470,7 @@ class StorageManager:
                     'membrane': lif_data['membrane'],
                     'spikes': lif_data.get('spikes', [0] * len(lif_data['membrane']))
                 })
-                lif_csv_path = os.path.join(analysis_dir, f"lif_{timestamp_safe}.csv")
+                lif_csv_path = os.path.join(analysis_dir, f"lif{channel_suffix}_{timestamp_safe}.csv")
                 lif_df.to_csv(lif_csv_path, index=False)
                 
                 # Save LIF Plot
@@ -445,11 +493,48 @@ class StorageManager:
                 plt.legend(loc='upper right')
                 plt.grid(True, alpha=0.3)
                 plt.tight_layout()
-                plt.savefig(os.path.join(plots_dir, f"lif_{timestamp_safe}.png"), dpi=100)
+                plt.savefig(os.path.join(plots_dir, f"lif{channel_suffix}_{timestamp_safe}.png"), dpi=100)
                 plt.close()
                 print(f"[STORAGE] ✓ Saved LIF: {lif_csv_path}")
             
-            # ===== 4. Create Combined Analysis Plot (3x2 grid) =====
+            # ===== 4. Save CWT Scalogram (Wavelet) =====
+            if filtered_waveform or raw_waveform:
+                try:
+                    import pywt
+                    sig_cwt = np.array(filtered_waveform if filtered_waveform else raw_waveform, dtype=np.float64)
+                    
+                    # Scales 1-64
+                    scales = np.arange(1, 65)
+                    
+                    # 'mexh' (Mexican Hat) is standard for event detection in seismic/vibration
+                    coef, freqs_cwt = pywt.cwt(sig_cwt, scales, 'mexh')
+                    
+                    # Save CWT CSV
+                    import pandas as pd
+                    cwt_df = pd.DataFrame(coef, index=[f"Scale_{s}" for s in scales])
+                    cwt_csv_path = os.path.join(analysis_dir, f"cwt{channel_suffix}_{timestamp_safe}.csv")
+                    cwt_df.to_csv(cwt_csv_path)
+                    
+                    # Save CWT Plot
+                    plt.figure(figsize=(10, 4))
+                    # Use 'coolwarm' or 'seismic' for diverging data (positive/negative coefficients)
+                    plt.imshow(coef, extent=[0, len(sig_cwt), 1, 64], cmap='seismic', aspect='auto',
+                              vmax=np.max(np.abs(coef)), vmin=-np.max(np.abs(coef)))
+                    plt.colorbar(label='Amplitude')
+                    plt.title(f"CWT Scalogram (Mexican Hat) - {person}", fontsize=12, fontweight='bold')
+                    plt.xlabel("Time (samples)")
+                    plt.ylabel("Scale (1=High Freq, 64=Low Freq)")
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(plots_dir, f"cwt{channel_suffix}_{timestamp_safe}.png"), dpi=100)
+                    plt.close()
+                    print(f"[STORAGE] ✓ Saved CWT: {cwt_csv_path}")
+                    
+                except ImportError:
+                    print("[STORAGE] pywt not installed, skipping CWT")
+                except Exception as e:
+                    print(f"[STORAGE] Error saving CWT: {e}")
+            
+            # ===== 5. Create Combined Analysis Plot (3x2 grid) =====
             fig, axes = plt.subplots(3, 2, figsize=(14, 12))
             fig.suptitle(f"Footstep Analysis - {person} ({timestamp_safe})", fontsize=14, fontweight='bold')
             
@@ -526,7 +611,7 @@ class StorageManager:
                 ax6.text(0.5, 0.5, "No spike data", ha='center', va='center', transform=ax6.transAxes)
             
             plt.tight_layout()
-            combined_path = os.path.join(plots_dir, f"combined_{timestamp_safe}.png")
+            combined_path = os.path.join(plots_dir, f"combined{channel_suffix}_{timestamp_safe}.png")
             plt.savefig(combined_path, dpi=120)
             plt.close()
             print(f"[STORAGE] ✓ Saved combined analysis: {combined_path}")
@@ -551,7 +636,8 @@ class StorageManager:
         if os.path.exists(HOME_CSV_PATH):
             try:
                 import pandas as pd
-                df = pd.read_csv(HOME_CSV_PATH)
+                # Handle potentially inconsistent column counts due to version changes
+                df = pd.read_csv(HOME_CSV_PATH, on_bad_lines='skip')
                 status["home_csv"]["exists"] = True
                 status["home_csv"]["samples"] = len(df)
                 if '_person' in df.columns:
@@ -563,7 +649,7 @@ class StorageManager:
         if os.path.exists(INTRUDER_CSV_PATH):
             try:
                 import pandas as pd
-                df = pd.read_csv(INTRUDER_CSV_PATH)
+                df = pd.read_csv(INTRUDER_CSV_PATH, on_bad_lines='skip')
                 status["intruder_csv"]["exists"] = True
                 status["intruder_csv"]["samples"] = len(df)
             except Exception as e:
@@ -574,14 +660,16 @@ class StorageManager:
             for person_dir in os.listdir(DATASET_DIR):
                 person_path = os.path.join(DATASET_DIR, person_dir)
                 if os.path.isdir(person_path):
-                    csv_path = os.path.join(person_path, f"features_{person_dir}.csv")
-                    if os.path.exists(csv_path):
+                    import glob
+                    csv_files = glob.glob(os.path.join(person_path, "features_*.csv"))
+                    for csv_path in csv_files:
                         try:
                             import pandas as pd
-                            df = pd.read_csv(csv_path)
+                            df = pd.read_csv(csv_path, on_bad_lines='skip')
                             status["individual_files"].append({
-                                "name": person_dir,
-                                "samples": len(df)
+                                "name": os.path.basename(csv_path),
+                                "samples": len(df),
+                                "person": person_dir
                             })
                         except:
                             pass
@@ -603,14 +691,17 @@ class StorageManager:
             for person_dir in os.listdir(DATASET_DIR):
                 person_path = os.path.join(DATASET_DIR, person_dir)
                 if os.path.isdir(person_path):
-                    csv_path = os.path.join(person_path, f"features_{person_dir}.csv")
-                    if os.path.exists(csv_path):
+                    import glob
+                    csv_files = glob.glob(os.path.join(person_path, "features_*.csv"))
+                    person_total = 0
+                    for csv_path in csv_files:
                         try:
                             import pandas as pd
-                            df = pd.read_csv(csv_path)
-                            counts[person_dir] = len(df)
+                            df = pd.read_csv(csv_path, on_bad_lines='skip')
+                            person_total += len(df)
                         except Exception as e:
                             print(f"[STORAGE] Error reading {csv_path}: {e}")
+                    counts[person_dir] = person_total
         return counts
 
     def get_all_samples(self):
@@ -711,3 +802,130 @@ class StorageManager:
         }
             
         return data, labels, dataset_details
+
+    def save_multichannel_event(self, person: str, channel_data: List[Dict[str, Any]], save_as_intruder: bool = False) -> Dict[str, bool]:
+        """
+        Saves a single event (footstep) that spans multiple channels into ONE record.
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp_safe = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            result = {"main_csv": False, "individual_csv": False, "sqlite": False, "vibrations_csv": False}
+            
+            combined_features = {}
+            raw_waveforms = {}
+            
+            main_class = 'INTRUDER' if save_as_intruder else 'HOME'
+            
+            # Normalize person label
+            individual_name = person
+            if '_' in person and len(person.split('_', 1)) > 1:
+                individual_name = person.split('_', 1)[1]
+            
+            if individual_name and individual_name.upper() not in ['HOME', 'INTRUDER']:
+                normalized_person = f"{main_class}_{individual_name}"
+            else:
+                normalized_person = main_class
+
+            # 1. Gather and Prefix Data
+            for ch_item in channel_data:
+                ch_idx = ch_item.get('channel', 0)
+                features = ch_item.get('features', {})
+                
+                # Combine features with prefix
+                for k, v in features.items():
+                    if not k.startswith('_'):
+                        combined_features[f"ch{ch_idx}_{k}"] = v
+                
+                if 'raw_waveform' in ch_item:
+                    raw_waveforms[ch_idx] = ch_item['raw_waveform']
+
+            # Attach Metadata
+            combined_features['_label'] = main_class
+            combined_features['_person'] = individual_name
+            combined_features['_timestamp'] = timestamp
+            
+            # 2. Save Combined Raw Vibrations
+            person_dir = os.path.join(DATASET_DIR, normalized_person)
+            os.makedirs(person_dir, exist_ok=True)
+            
+            if raw_waveforms:
+                vibe_path = self._save_combined_vibrations(person_dir, raw_waveforms, timestamp_safe, normalized_person)
+                if vibe_path: result["vibrations_csv"] = True
+
+            # 3. Save to the unified 4-channel dataset
+            self._write_to_multi_csv(MULTI_CHANNEL_DATASET_PATH, combined_features)
+            result["main_csv"] = True
+            
+            # 4. Save to individual person CSV (properly named)
+            csv_path = os.path.join(person_dir, f"features_4channel_{normalized_person}.csv")
+            self._write_to_multi_csv(csv_path, combined_features)
+            result["individual_csv"] = True
+            
+            # 5. SQLite
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("INSERT INTO samples (person, features_json, timestamp) VALUES (?, ?, ?)",
+                          (normalized_person, json.dumps(combined_features), timestamp))
+                conn.commit()
+                conn.close()
+                result["sqlite"] = True
+            except Exception as e:
+                print(f"[STORAGE] Error saving multichannel to SQLite: {e}")
+
+            return result
+        except Exception as e:
+            print(f"[STORAGE] Error in save_multichannel_event: {e}")
+            return {"error": str(e)}
+
+    def _save_combined_vibrations(self, person_dir: str, waveforms: Dict[int, List], timestamp_safe: str, person: str):
+        try:
+            import pandas as pd
+            max_len = max(len(w) for w in waveforms.values()) if waveforms else 0
+            if max_len == 0: return None
+            
+            data = {
+                'sample_index': range(max_len),
+                'timestamp_ms': [i * 5 for i in range(max_len)]
+            }
+            
+            for ch in range(4):
+                if ch in waveforms:
+                    raw = waveforms[ch]
+                    if len(raw) < max_len:
+                        raw = list(raw) + [2048] * (max_len - len(raw))
+                    data[f'piezo_ch{ch}'] = raw
+                else:
+                    # Fill inactive channels with baseline
+                    data[f'piezo_ch{ch}'] = [2048] * max_len
+            
+            df = pd.DataFrame(data)
+            vibe_dir = os.path.join(person_dir, "vibrations")
+            os.makedirs(vibe_dir, exist_ok=True)
+            path = os.path.join(vibe_dir, f"vibration_combined_{timestamp_safe}.csv")
+            df.to_csv(path, index=False)
+            return path
+        except Exception as e:
+            print(f"[STORAGE] Error saving combined vibrations: {e}")
+            return None
+
+    def _write_to_multi_csv(self, path: str, data: Dict[str, Any]):
+        file_exists = os.path.exists(path)
+        fieldnames = list(data.keys())
+        
+        # Robust header handling for evolving schemas
+        if file_exists:
+            with open(path, 'r', newline='') as f:
+                reader = csv.reader(f)
+                try:
+                    header = next(reader)
+                    fieldnames = header
+                except StopIteration:
+                    file_exists = False
+        
+        with open(path, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(data)

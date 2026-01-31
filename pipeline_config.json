@@ -1,0 +1,71 @@
+{
+    "pipeline_update_version": "2.0_RealWorld_Ready",
+    "data_input": {
+        "source": "Raw_ADC_Burst",
+        "sampling_rate_hz": 10000,
+        "buffer_duration_ms": 1000,
+        "pre_processing": "Butterworth_Bandpass_0.5Hz_to_100Hz"
+    },
+    "image_extraction_module": {
+        "type": "CWT_Heatmap",
+        "wavelet_mother": "cmor3-3",
+        "scale_range": [
+            1,
+            128
+        ],
+        "output_resolution": [
+            224,
+            224,
+            3
+        ],
+        "normalization": "Global_MinMax",
+        "target_dir": "data/processed/images/a2_style/"
+    },
+    "numerical_feature_replacement": {
+        "logic": "Four_Phase_Segmentation",
+        "segments": [
+            {
+                "id": "HEEL_IMPACT",
+                "window_ms": 150,
+                "peak_search": true
+            },
+            {
+                "id": "FOOT_ROLLING",
+                "window_ms": 300,
+                "spectral_flux": true
+            },
+            {
+                "id": "TOE_PUSH_OFF",
+                "window_ms": 150,
+                "kurtosis_window": true
+            },
+            {
+                "id": "SIGNAL_DAMPING",
+                "window_ms": 400,
+                "decay_constant": true
+            }
+        ],
+        "new_feature_vector_size": 128,
+        "critical_features_to_add": [
+            "Heel_to_Toe_Delay_MS",
+            "Impact_Sharpness_Ratio",
+            "Damping_Coefficient",
+            "Cadence_InterStep_Variance",
+            "Spectral_Centroid_Drift"
+        ]
+    },
+    "integration_rules": {
+        "file_structure": "NO_CHANGE",
+        "csv_format": "REPLACE_EXISTING_COLUMNS",
+        "labeling": "PRESERVE_SUBFOLDER_LOGIC",
+        "backward_compatibility": {
+            "mapping": "Map_New_128_to_Old_100_Placeholder_If_Needed",
+            "ui_feedback": "Send_CWT_Image_Path_To_Frontend"
+        }
+    },
+    "model_deployment": {
+        "engine": "Hybrid_ResNet18_MLP",
+        "weights_init": "Transfer_Learning_From_Geophone_A2",
+        "ensemble_logic": "Soft_Voting_0.7_CNN_0.3_XGB"
+    }
+}
